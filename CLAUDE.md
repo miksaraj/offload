@@ -6,6 +6,28 @@ and [SPEC.md](./SPEC.md) first — this file only covers things those
 docs don't: current build state, conventions, and gotchas hit while
 building it.
 
+## Before every push / PR
+
+Before pushing or opening a PR, reflect on the session's work and
+update this file and any `.claude/skills/*` if they're now stale:
+
+- Did the **build-phase state** below move on (a phase landed, a stub
+  became real)? Update "Current state."
+- Did a **deferred dependency** get added, or should the next one be?
+  Update "Deliberately deferred dependencies."
+- Did you hit a **new gotcha** — a confusing compiler error, a footgun
+  in a crate API, a non-obvious fix? Add it, with the fix, to
+  "Gotchas." Only add things you actually hit, not generic advice.
+- Did a **convention** change or get established (new error-handling
+  pattern, new crate dependency rule)? Update "Conventions."
+- Did the CLI surface, build command, or test command change in a way
+  that makes `.claude/skills/run-offload/SKILL.md` or `smoke.sh`
+  inaccurate? Update and re-run the skill to verify it still passes
+  before committing it.
+
+Skip silently if nothing changed — don't pad these docs with no-op
+edits, and don't write speculative entries for work you haven't done.
+
 ## Current state
 
 Phase 0 (project skeleton) is complete: Cargo workspace with all seven
