@@ -1,0 +1,19 @@
+[package]
+name = "pipeline-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+video-io.workspace = true
+detector.workspace = true
+tracker.workspace = true
+reid.workspace = true
+classifier.workspace = true
+compiler.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tracing.workspace = true

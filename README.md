@@ -99,7 +99,7 @@ See [SPEC.md](./SPEC.md) for functional requirements, pipeline behaviour, input/
 
 | Phase | Description | Status |
 |---|---|---|
-| 0 | Project skeleton & tooling | ⬜ |
+| 0 | Project skeleton & tooling | ✅ |
 | 1 | Video I/O (extraction & compilation) | ⬜ |
 | 2 | Player detection (YOLOv8 + ONNX) | ⬜ |
 | 3 | Multi-object tracking (ByteTrack) | ⬜ |

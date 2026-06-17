@@ -1,0 +1,34 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/miksaraj/offload"
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+image = "0.25"
+ndarray = "0.16"
+toml = "0.8"
+
+pipeline-core = { path = "crates/pipeline-core" }
+video-io = { path = "crates/video-io" }
+detector = { path = "crates/detector" }
+tracker = { path = "crates/tracker" }
+reid = { path = "crates/reid" }
+classifier = { path = "crates/classifier" }
+compiler = { path = "crates/compiler" }
+
+[profile.release]
+lto = true
