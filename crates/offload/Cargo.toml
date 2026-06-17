@@ -1,0 +1,20 @@
+[package]
+name = "offload"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "offload"
+path = "src/lib.rs"
+
+[[bin]]
+name = "offload"
+path = "src/main.rs"
+
+[dependencies]
+pipeline-core.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

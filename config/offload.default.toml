@@ -1,0 +1,71 @@
+[models]
+# Paths to ONNX model files
+detector = "models/yolov8n.onnx"
+reid     = "models/osnet_x1_0.onnx"
+
+[ollama]
+endpoint = "http://localhost:11434"
+model    = "llava"               # or "moondream", or any installed vision model
+timeout_secs = 30
+required = false
+
+[video]
+# FPS to sample for detection. Lower = faster, less temporal resolution.
+# At 25fps source, 8 = every 3rd frame.
+detection_fps = 8
+# Internal working resolution (frames rescaled to this before detection)
+working_width  = 1280
+working_height = 720
+
+[detector]
+# YOLOv8 inference settings
+confidence_threshold = 0.4
+nms_iou_threshold    = 0.45
+# Execution provider: "cpu", "cuda", "coreml"
+execution_provider   = "cpu"
+
+[tracker]
+high_confidence_threshold = 0.6
+low_confidence_threshold  = 0.1
+max_lost_frames           = 30    # frames before a lost track is removed
+
+[reid]
+# How many candidate frames to extract for interactive identification
+candidate_frame_count    = 3
+# How many seconds into the video to look for candidate frames
+candidate_window_secs    = 300
+# How many seconds to pre-scan for confirmation after identification
+confirmation_scan_secs   = 60
+# Max re-identification attempts before exiting with error
+max_identification_attempts = 5
+lock_threshold           = 0.72   # cosine similarity to lock subject identity
+vote_window              = 10     # frames over which to average similarity votes
+reentry_threshold        = 0.68
+reentry_vote_window      = 5
+max_identification_frame = 600    # warn if subject not re-locked by this frame
+
+[classifier]
+sample_interval_ms       = 2000   # how often to query Ollama per subject presence
+min_bbox_area_fraction   = 0.002  # skip frames where subject bbox is too small
+highlight_threshold      = 6.5    # score at or above (with kind=highlight) = highlight moment
+merge_gap_ms             = 4000   # merge moments of same kind closer than this
+min_moment_duration_ms   = 1500   # discard moments shorter than this after padding
+jpeg_quality             = 80     # JPEG quality for frames sent to Ollama
+# Override the default prompt (must request JSON {score, kind, event} format)
+# prompt_template = "..."
+
+[compiler]
+padding_ms             = 3000    # padding added before and after each moment
+transition_duration_ms = 500     # crossfade duration between clips
+label_display_ms       = 3000    # how long to show event label overlay
+output_crf             = 23      # H.264 CRF (lower = higher quality/larger file)
+output_preset          = "medium"
+# output_resolution = "1280x720" # defaults to source resolution if unset
+# audio_track = "music.mp3"      # optional background music
+music_volume           = 0.25    # background music relative volume (0.0-1.0)
+music_only             = false   # replace match audio with music track
+
+[cache]
+enabled = true
+# Cache directory. Defaults to <output_dir>/.offload_cache/
+# dir = ".offload_cache"

@@ -1,0 +1,2 @@
+Reserved for end-to-end pipeline integration tests (Phase 6).
+CLI-parsing tests live in crates/offload/tests/.
