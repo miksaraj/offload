@@ -2,7 +2,7 @@
 
 **Offload** is a self-hosted, privacy-first CLI tool that automatically identifies and compiles personal highlight and lowlight reels from raw rugby match footage.
 
-You provide a full game video and a reference photo of yourself in kit. Offload finds you, follows you across all 80 minutes, and produces a compilation of your key moments — tries, carries, tackles, turnovers — with no manual clipping, no cloud upload, no subscription, and no reliance on club infrastructure.
+You provide a full game video. Offload pauses early in the run to let you identify yourself interactively from an annotated frame extracted from the footage — no reference photo needed. From there it follows you across all 80 minutes and produces a compilation of your key moments — tries, carries, tackles, turnovers — with no manual clipping, no cloud upload, no subscription, and no reliance on club infrastructure.
 
 > *In rugby, an offload is a pass made while in the grip of a tackle — getting the ball out of a dangerous situation. This tool offloads the tedious editing work so you can focus on the game.*
 
