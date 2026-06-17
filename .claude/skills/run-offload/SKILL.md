@@ -72,10 +72,11 @@ the CLI parses each subcommand and rejects `run` without `--input`.
   return `Ok(())` — only `run` currently exercises a real error path
   (missing input file → exit 1). Don't assume a clean exit means a
   stage actually did something; check the log output too.
-- **No CI workflow exists yet** (no `.github/workflows/`), so there's
-  nothing to babysit through GitHub Actions yet beyond local checks.
-  Run this skill's smoke script (and `cargo clippy --workspace
-  --all-targets`, `cargo fmt --check`) locally before pushing.
+- **CI (`.github/workflows/ci.yml`) runs `fmt --check`, `clippy -D
+  warnings`, `build`, and `test`** on every push to `main` and every
+  PR. Run this skill's smoke script (and `cargo clippy --workspace
+  --all-targets -- -D warnings`, `cargo fmt --all --check`) locally
+  before pushing so CI doesn't fail on something checkable upfront.
 
 ## Troubleshooting
 
