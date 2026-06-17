@@ -60,14 +60,15 @@ Similarly, `reqwest`/`tokio`/`serde_json` are already wired into
 `classifier`'s `Cargo.toml` (pure-Rust, no system deps, safe to add
 early) but unused until Phase 5's Ollama client lands.
 
-## No CI yet
+## CI
 
-There's no `.github/workflows/` — SPEC.md's Phase 0 deliverable says
-"CI green" but that wasn't part of the original ask for this scaffold.
-Before relying on GitHub Actions for anything (status checks, branch
-protection "require status checks"), a workflow needs to be added
-(`cargo build --workspace`, `cargo test --workspace`, `cargo clippy
---workspace --all-targets -- -D warnings`, `cargo fmt --check`).
+`.github/workflows/ci.yml` runs on every push to `main` and every PR:
+`cargo fmt --all --check`, `cargo clippy --workspace --all-targets --
+-D warnings`, `cargo build --workspace`, `cargo test --workspace`, in
+that order, on `ubuntu-latest` with `Swatinem/rust-cache` for
+dependency caching. All four checks were run locally against the
+current scaffold before this workflow was added — fmt/clippy are
+clean with no warnings.
 
 ## Gotchas
 
