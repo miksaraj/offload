@@ -76,6 +76,13 @@ the repo (personal/copyrighted video, no Git LFS configured) — run it
 with `OFFLOAD_SAMPLE_CLIP=/path/to/clip.mp4 cargo test -p video-io --
 --ignored --nocapture` and inspect the PNGs it dumps to
 `$TMPDIR/offload_real_clip_frames/`.
+`crates/video-io/tests/write_clips.rs` exercises `ClipWriter` against
+the same fixture: writes two padded, non-adjacent windows at a
+downscaled resolution and configured bitrate, then re-decodes the
+output with `FrameExtractor` to assert dimensions and non-decreasing
+timestamps; a second test asserts an empty clip list errors. `video-io`
+also has a `#[cfg(test)]` unit test module covering `ClipWriter`'s
+internal range-padding/clamping/merging logic directly.
 
 ## Gotchas
 
