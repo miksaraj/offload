@@ -69,7 +69,13 @@ subcommand and rejects `run` without `--input`.
 fixture clip (`crates/video-io/tests/fixtures/testsrc.mp4`, a synthetic
 `ffmpeg testsrc` pattern) via `FrameExtractor`, dumps every 30th frame
 as a PNG to `$TMPDIR/offload_test_frames/`, and asserts dimensions,
-pixel buffer size, and non-decreasing timestamps.
+pixel buffer size, and non-decreasing timestamps. The same file also
+has an `#[ignore]`d test, `extracts_every_30th_frame_from_real_clip`,
+for ad hoc verification against real footage that isn't checked into
+the repo (personal/copyrighted video, no Git LFS configured) — run it
+with `OFFLOAD_SAMPLE_CLIP=/path/to/clip.mp4 cargo test -p video-io --
+--ignored --nocapture` and inspect the PNGs it dumps to
+`$TMPDIR/offload_real_clip_frames/`.
 
 ## Gotchas
 

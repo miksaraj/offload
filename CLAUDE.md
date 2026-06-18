@@ -49,7 +49,12 @@ inside the extractor. `ClipWriter` (Phase 1b) is still a stub.
 `crates/video-io/tests/extract_frames.rs` decodes a checked-in synthetic
 fixture (`tests/fixtures/testsrc.mp4`, generated via `ffmpeg -f lavfi -i
 testsrc=...`) and dumps every 30th frame as a PNG for visual
-verification.
+verification. It also decoded correctly against a real ~25s rugby clip
+(706x848, 60fps h264) the user sourced — confirmed via an `#[ignore]`d
+test (see `.claude/skills/run-offload/SKILL.md`'s "Test" section); that
+clip wasn't committed (personal footage, no Git LFS configured), so
+future real-footage checks need a clip supplied locally via
+`OFFLOAD_SAMPLE_CLIP`.
 
 To verify the project still builds and the CLI still works after a
 change, use the `/run-offload` skill (`.claude/skills/run-offload/`)
