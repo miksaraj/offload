@@ -18,6 +18,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
+      - name: Install FFmpeg dev libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libavutil-dev libavformat-dev libavfilter-dev \
+            libavdevice-dev libswscale-dev libswresample-dev libavcodec-dev \
+            pkg-config ffmpeg
+
       - name: cargo fmt --check
         run: cargo fmt --all --check
 

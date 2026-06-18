@@ -21,6 +21,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 image = "0.25"
 ndarray = "0.16"
 toml = "0.8"
+ffmpeg-next = "7"
 
 pipeline-core = { path = "crates/pipeline-core" }
 video-io = { path = "crates/video-io" }
