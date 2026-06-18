@@ -13,12 +13,19 @@ codes and output.
 
 ## Prerequisites
 
-No system packages are required for the current (Phase 0) scaffold —
-`ffmpeg-next` and `ort` (ONNX Runtime) are intentionally not yet wired
-in as dependencies, so there are no system FFmpeg/ONNX Runtime libs to
-install. When a later phase adds them (video-io needs `libavformat`
-etc., detector/reid need the ONNX Runtime shared lib), update this
-section with the exact `apt-get` line and re-verify this skill.
+Phase 1a wired `ffmpeg-next` into `video-io`, which links against system
+FFmpeg libraries at build time. Install the dev libs (and the `ffmpeg`
+CLI, used to generate/regenerate the test fixture clip) before building:
+
+```bash
+sudo apt-get install -y libavutil-dev libavformat-dev libavfilter-dev \
+  libavdevice-dev libswscale-dev libswresample-dev libavcodec-dev \
+  pkg-config ffmpeg
+```
+
+`ort` (ONNX Runtime) is still not wired in — `detector`/`reid` don't need
+any system libs yet. When a later phase adds it, update this section
+with the exact prerequisite and re-verify this skill.
 
 ## Build
 
@@ -56,8 +63,19 @@ without it, only warnings/errors print by default.
 cargo test --workspace
 ```
 
-The only test today is `crates/offload/tests/cli_parses.rs`, asserting
-the CLI parses each subcommand and rejects `run` without `--input`.
+`crates/offload/tests/cli_parses.rs` asserts the CLI parses each
+subcommand and rejects `run` without `--input`.
+`crates/video-io/tests/extract_frames.rs` decodes the checked-in
+fixture clip (`crates/video-io/tests/fixtures/testsrc.mp4`, a synthetic
+`ffmpeg testsrc` pattern) via `FrameExtractor`, dumps every 30th frame
+as a PNG to `$TMPDIR/offload_test_frames/`, and asserts dimensions,
+pixel buffer size, and non-decreasing timestamps. The same file also
+has an `#[ignore]`d test, `extracts_every_30th_frame_from_real_clip`,
+for ad hoc verification against real footage that isn't checked into
+the repo (personal/copyrighted video, no Git LFS configured) — run it
+with `OFFLOAD_SAMPLE_CLIP=/path/to/clip.mp4 cargo test -p video-io --
+--ignored --nocapture` and inspect the PNGs it dumps to
+`$TMPDIR/offload_real_clip_frames/`.
 
 ## Gotchas
 
@@ -77,6 +95,9 @@ the CLI parses each subcommand and rejects `run` without `--input`.
   PR. Run this skill's smoke script (and `cargo clippy --workspace
   --all-targets -- -D warnings`, `cargo fmt --all --check`) locally
   before pushing so CI doesn't fail on something checkable upfront.
+  CI's `ubuntu-latest` runner installs the same FFmpeg dev libs from
+  "Prerequisites" via an explicit step before the build (they aren't
+  preinstalled on the runner image).
 
 ## Troubleshooting
 
