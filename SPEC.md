@@ -32,6 +32,7 @@ This document defines the functional requirements, pipeline behaviour, input/out
 - Run entirely locally with no network dependency beyond Ollama (which is also local)
 - Resume gracefully from cached intermediate results after interruption
 - Support a configurable debug mode that produces annotated frame dumps at every pipeline stage
+- Support inputs that contain more than one discrete match (e.g. a 7s tournament livestream, or an XV/touch game where the subject is substituted on partway through) by segmenting the input — manually via config or via heuristic detection — so identification, moment grouping, and clip assembly are each scoped to the correct match
 
 ### Non-Goals
 
@@ -84,6 +85,19 @@ ByteTrack algorithm:
 7. Unmatched high-confidence detections with no existing track create new `Track` objects
 8. Track IDs are monotonically increasing integers; never reused within a run
 
+### Stage 3.5 — Match Segmentation (multi-match inputs only)
+
+**Input:** per-frame detection counts (Stage 2 output), `segmentation` config  
+**Output:** `Vec<MatchSegment> { start_ms, end_ms, label: Option<String> }`
+
+Most inputs (a single XV/touch/7s game) are one implicit segment spanning the whole video and need no configuration — this stage is a no-op by default. It only activates when `segmentation.enabled = true` or `segmentation.segments` is non-empty.
+
+1. **Manual segments** (`segmentation.segments` in `offload.toml`, an array of `{ start, end, label }` with `start`/`end` as `"HH:MM:SS"` strings): used verbatim, no detection required. This is the reliable path for a known tournament running order.
+2. **Heuristic auto-detection** (`segmentation.enabled = true`, no manual list given): scans the per-frame detection counts already produced by Stage 2 for stretches longer than `segmentation.min_gap_ms` (default: 90000ms) where detected-player count stays at or below `segmentation.empty_pitch_threshold` (default: 2) — i.e. the broadcast has cut away from an active game (studio, crowd, next-game warm-up). Boundaries are placed at the midpoint of each qualifying gap. Segments shorter than `segmentation.min_segment_duration_ms` (default: 180000ms) are discarded as noise rather than treated as a match.
+3. **Confirmation:** when auto-detection produces more than one segment, print the proposed list (start/end timestamps, like the `--dry-run` moment table) and prompt the user to accept, edit (re-enter as manual `segments`), or proceed without segmentation. This reuses the existing confirm-before-committing UX pattern from Sub-phase 4B rather than introducing a new interaction style.
+
+If segmentation is inactive, all downstream stages behave exactly as today (one implicit segment = the whole video). If active, `MatchSegment`s are threaded into Stage 4A (identification windowing), Stage 5 (moment grouping must not merge across a boundary), and Stage 6 (clip padding must clamp to segment bounds, not just video bounds).
+
 ### Stage 4 — Player Re-Identification
 
 **Input:** per-frame track list, ReID model, user interaction  
@@ -95,7 +109,7 @@ This stage has two sub-phases: **interactive identification** (run once before t
 
 Before the full video is processed, the pipeline pauses to let the user identify themselves from the actual footage. This is the only input required to identify the subject — no external reference photo is needed.
 
-1. Extract `reid.candidate_frame_count` (default: 3) frames spread across the first `reid.candidate_window_secs` (default: 300) seconds of the video
+1. Extract `reid.candidate_frame_count` (default: 3) frames spread across `reid.candidate_window_secs` (default: 300) seconds of footage, starting at the beginning of the **target segment** — the first `MatchSegment` by default, or the segment containing `reid.candidate_window_start_secs` if set (use this when the subject isn't visible until partway through, e.g. subbed on mid-game, or playing in a later game within a tournament stream). When no segmentation is active, the target segment is the whole video, matching today's behaviour.
 2. Run detection on each candidate frame; select the frame with the most detections (most players visible = easiest to find yourself)
 3. Save an annotated JPEG to a known temporary path (e.g. `/tmp/offload_select.jpg`) with each detected player bounding box labelled with a number (1, 2, 3 …)
 4. Attempt to open the image in the system default viewer:
@@ -153,6 +167,12 @@ Once the `reference_embedding` is established:
 - On each subsequent frame, any new track with cosine similarity above `reid.reentry_threshold` (default: 0.68) is candidate for re-assignment as the subject
 - Re-entry uses a shorter vote window (`reid.reentry_vote_window`, default: 5 frames)
 - Re-entry does **not** prompt the user; it is automatic
+
+#### Cross-Segment Behaviour (multi-match inputs only)
+
+- The `reference_embedding` from Sub-phase 4A/4B is established once and reused for every segment — it is not re-collected per match
+- At the start of each subsequent segment, the lock state resets and per-frame ReID matching (and re-entry) runs fresh against that segment's tracks; no new interactive prompt is shown
+- A segment in which the subject never locks (e.g. their team has a bye, or they don't feature in that game) is not an error — it simply contributes zero moments in Stage 5
 
 #### Failure Mode
 
@@ -214,21 +234,23 @@ Return ONLY a JSON object with no preamble:
 - A **highlight moment** is formed from a cluster of samples where `kind == "highlight"` and `score >= classifier.highlight_threshold` (default: 6.5)
 - A **lowlight moment** is formed from a single sample or tight cluster where `kind == "lowlight"` — lowlights are point events; they do not require duration
 - `kind == "neutral"` samples do not form moments
-- Adjacent moments of the same kind within `classifier.merge_gap_ms` (default: 4000ms) are merged
+- Adjacent moments of the same kind within `classifier.merge_gap_ms` (default: 4000ms) are merged, **except** across a `MatchSegment` boundary — two same-kind samples either side of a segment boundary are never merged into one moment, regardless of gap size, since they belong to different matches
 - Each moment's `label` is taken from the `event` field of the highest-scoring sample in that cluster
 - Moments shorter than `classifier.min_moment_duration_ms` (default: 1500ms) after padding are discarded
+- When segmentation is active, each `Moment` records the `MatchSegment` it belongs to, so dry-run output and compilation can group/label by match
 
 ### Stage 6 — Compilation
 
 **Input:** source video path, `Vec<Moment>`, compiler config  
 **Output:** compiled video file
 
-- For each moment, define a clip: `[moment.start_ms - compiler.padding_ms, moment.end_ms + compiler.padding_ms]` (default padding: 3000ms each side), clamped to video bounds
+- For each moment, define a clip: `[moment.start_ms - compiler.padding_ms, moment.end_ms + compiler.padding_ms]` (default padding: 3000ms each side), clamped to the moment's `MatchSegment` bounds when segmentation is active (otherwise clamped to video bounds, as today) — this stops padding from pulling in footage from a different match
 - Extract each clip from the source video (stream copy where possible, transcode only if needed for concat compatibility)
 - Apply crossfade transition of `compiler.transition_duration_ms` (default: 500ms) between clips
 - Overlay event label as lower-third text for `compiler.label_display_ms` (default: 3000ms) at the start of each clip
 - If `compiler.audio_track` is set, mix it in at `compiler.music_volume` (default: 0.25) under the original match audio (or `compiler.music_only: true` to replace original audio)
 - Encode output at `compiler.output_crf` (default: 23), `compiler.output_preset` (default: "medium"), `compiler.output_resolution` (default: source resolution)
+- When segmentation is active and `compiler.split_output_per_segment = true`, write one output file per segment that has moments (named `<output>.<segment_label_or_index>.mp4`) instead of one combined file (default: `false`, matching today's single-file behaviour)
 
 ---
 
@@ -248,6 +270,7 @@ Options:
       --debug                 Write annotated frame dumps to ./debug/
       --dry-run               Print moment list without rendering video
       --no-cache              Ignore and overwrite any existing cache
+      --auto-segment          Override segmentation.enabled for this run (heuristic match-boundary detection)
   -h, --help                  Print help
 ```
 
@@ -263,6 +286,7 @@ Options:
   -d, --duration <SECS>       Seconds to inspect [default: 30]
   -o, --output-dir <DIR>      Directory for annotated frames [default: ./inspect/]
   -c, --config <FILE>         Config file path [default: offload.toml]
+      --show-segments         Run heuristic match segmentation and print the proposed boundaries without processing further
 ```
 
 ### `offload cache`
@@ -340,6 +364,21 @@ Offload — Moment Summary
 Total: 7 highlights, 2 lowlights | Est. output: 8m 44s
 ```
 
+When segmentation is active and more than one segment contains moments, the table is grouped by segment with a per-segment subtotal:
+
+```
+Offload — Moment Summary
+═══════════════════════════════════════════════════════════
+── Match 1 (00:00–32:10) — Pool vs Avengers 7s ──────────────
+ #   Kind        Start      End       Duration   Label
+ 1   HIGHLIGHT   12:34.200  12:41.800   7.6s     Ball carry
+ 2   LOWLIGHT    34:22.000  34:26.400   4.4s     Missed tackle
+── Match 2 (58:40–90:05) — Pool vs Harlequins 7s ────────────
+ 3   HIGHLIGHT   61:55.300  62:03.100   7.8s     Line break
+═══════════════════════════════════════════════════════════
+Total: 2 highlights, 1 lowlight across 2 matches | Est. output: 6m 12s
+```
+
 ### Debug Output
 
 When `--debug` is passed, writes annotated JPEG frames to `./debug/<stage>/`:
@@ -386,11 +425,32 @@ high_confidence_threshold = 0.6
 low_confidence_threshold  = 0.1
 max_lost_frames           = 30    # frames before a lost track is removed
 
+[segmentation]
+# Enable heuristic match-boundary auto-detection (no-op if `segments` is set below)
+enabled                    = false
+# Minimum stretch of near-empty pitch before it's considered a gap between matches
+min_gap_ms                 = 90000
+# Detected-player count at or below this is considered "empty pitch"
+empty_pitch_threshold      = 2
+# Discard candidate segments shorter than this (treated as noise, not a match)
+min_segment_duration_ms    = 180000
+# Manual segments, e.g. for a known tournament running order. Overrides auto-detection.
+# Times are "HH:MM:SS" against the source video timeline.
+# segments = [
+#   { start = "00:00:00", end = "00:32:10", label = "Pool vs Avengers 7s" },
+#   { start = "00:58:40", end = "01:30:05", label = "Pool vs Harlequins 7s" },
+# ]
+
 [reid]
 # How many candidate frames to extract for interactive identification
 candidate_frame_count    = 3
-# How many seconds into the video to look for candidate frames
+# How many seconds into the target segment to look for candidate frames
 candidate_window_secs    = 300
+# Optional: timestamp (seconds into the whole video) used to pick the target
+# segment for identification, for cases where the subject isn't visible until
+# partway through (subbed on mid-game, or first appears in a later match of a
+# tournament stream). Unset = use the first segment (or whole video).
+# candidate_window_start_secs = 3520
 # How many seconds to pre-scan for confirmation after identification
 confirmation_scan_secs   = 60
 # Max re-identification attempts before exiting with error
@@ -421,6 +481,7 @@ output_preset          = "medium"
 # audio_track = "music.mp3"      # optional background music
 music_volume           = 0.25    # background music relative volume (0.0–1.0)
 music_only             = false   # replace match audio with music track
+split_output_per_segment = false # write one output file per match instead of one combined file
 
 [cache]
 enabled = true
@@ -449,6 +510,8 @@ All errors are reported via `tracing` at the appropriate level. The CLI exits wi
 | Zero moments found after classification | Warning; no output video written; suggests adjusting thresholds |
 | FFmpeg encoding error | Fatal error with ffmpeg stderr captured in log |
 | Cache write failure | Non-fatal warning; run continues without caching |
+| Heuristic segmentation finds no qualifying gaps | Treated as a single implicit segment (no warning — this is the common case for a non-tournament input) |
+| User rejects the proposed segment list at confirmation | Re-prompt to edit manually, or proceed with no segmentation (single implicit segment) |
 
 ---
 
@@ -469,11 +532,12 @@ The following phases define the implementation roadmap. Each phase is designed t
 | 4b | ReID: Interactive Selection | Annotated frame saves, system viewer opens, user picks player, embedding generated |
 | 4c | ReID: Confirmation & Matching | Confirmation prompt works; per-frame cosine similarity correct |
 | 4d | ReID: Temporal Smoothing | Identity lock/re-entry logic verified on test sequence |
+| 4e | Match Segmentation | Manual `segmentation.segments` respected; heuristic gap-detection proposes boundaries from detection counts; confirm/edit prompt works; Stage 4A identification windowing targets the correct segment |
 | 5a | Classification: Ollama Client | Single frame scored successfully via Ollama with new 3-field response |
-| 5b | Classification: Moment Grouping | Highlights and lowlights correctly grouped as discrete events |
+| 5b | Classification: Moment Grouping | Highlights and lowlights correctly grouped as discrete events; merge never bridges a segment boundary |
 | 6 | Integration | Full pipeline runs end-to-end on a real 10-minute clip with interaction |
-| 7a | Output Polish | Transitions, overlays, and audio mixing in compiler |
-| 7b | Usability | Config file, progress bars, dry-run, README |
+| 7a | Output Polish | Transitions, overlays, and audio mixing in compiler; clip padding clamped to segment bounds; optional per-segment output files |
+| 7b | Usability | Config file, progress bars, dry-run (with per-segment grouping), README |
 
 ---
 
@@ -493,3 +557,5 @@ The v1.0 release is considered complete when all of the following hold:
 - [ ] All configuration options documented in this spec are functional
 - [ ] The tool compiles and runs on macOS (Apple Silicon) and Linux (x86_64) from a clean checkout using only `cargo build --release` plus the listed system dependencies
 - [ ] No network requests are made at runtime except to the local Ollama instance
+- [ ] On a tournament-style input with multiple matches in one file, manual `segmentation.segments` produce correctly scoped output: no clip bridges two different matches, and identification correctly targets a segment other than the first when configured to
+- [ ] On the same input, heuristic auto-detection (`segmentation.enabled = true`) proposes a segment list that a human would agree matches the actual match boundaries, and the confirm/edit prompt allows correcting it

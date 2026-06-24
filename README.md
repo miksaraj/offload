@@ -103,7 +103,7 @@ See [SPEC.md](./SPEC.md) for functional requirements, pipeline behaviour, input/
 | 1 | Video I/O (extraction & compilation) | ⬜ |
 | 2 | Player detection (YOLOv8 + ONNX) | ⬜ |
 | 3 | Multi-object tracking (ByteTrack) | ⬜ |
-| 4 | Player re-identification (OSNet) | ⬜ |
+| 4 | Player re-identification (OSNet) + match segmentation for multi-match/tournament inputs | ⬜ |
 | 5 | Highlight classification (Ollama) | ⬜ |
 | 6 | Pipeline integration | ⬜ |
 | 7 | Output polish & usability | ⬜ |
