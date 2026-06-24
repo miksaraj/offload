@@ -45,16 +45,31 @@ implementing `Iterator<Item = Frame>` — it yields every decoded frame
 (RGB24, original resolution) with `timestamp_ms`/`frame_number` derived
 from the stream's `best_effort_timestamp`; sampling (stride, target fps,
 resolution normalisation) is left to the caller/later phases, not done
-inside the extractor. `ClipWriter` (Phase 1b) is still a stub.
-`crates/video-io/tests/extract_frames.rs` decodes a checked-in synthetic
-fixture (`tests/fixtures/testsrc.mp4`, generated via `ffmpeg -f lavfi -i
-testsrc=...`) and dumps every 30th frame as a PNG for visual
-verification. It also decoded correctly against a real ~25s rugby clip
-(706x848, 60fps h264) the user sourced — confirmed via an `#[ignore]`d
-test (see `.claude/skills/run-offload/SKILL.md`'s "Test" section); that
-clip wasn't committed (personal footage, no Git LFS configured), so
-future real-footage checks need a clip supplied locally via
-`OFFLOAD_SAMPLE_CLIP`.
+inside the extractor. `crates/video-io/tests/extract_frames.rs` decodes
+a checked-in synthetic fixture (`tests/fixtures/testsrc.mp4`, generated
+via `ffmpeg -f lavfi -i testsrc=...`) and dumps every 30th frame as a
+PNG for visual verification. It also decoded correctly against a real
+~25s rugby clip (706x848, 60fps h264) the user sourced — confirmed via
+an `#[ignore]`d test (see `.claude/skills/run-offload/SKILL.md`'s
+"Test" section); that clip wasn't committed (personal footage, no Git
+LFS configured), so future real-footage checks need a clip supplied
+locally via `OFFLOAD_SAMPLE_CLIP`.
+
+Phase 1b (clip assembly) is complete: `video-io`'s `ClipWriter::write`
+takes a source path and a `&[ClipSpec]`, pads each clip's start/end by
+`ClipWriterConfig::padding_ms` (clamped to the source's duration),
+sorts and merges overlapping padded ranges, then does a single forward
+decode pass over the source — re-encoding (via libx264) only the
+frames that fall in a merged range — and concatenates them into one
+output file with continuous, gap-free timestamps (a plain incrementing
+frame counter, not wall-clock source timestamps; see Gotchas). Output
+resolution (`output_width`/`output_height`, default source resolution)
+and bitrate (`bitrate_kbps`, default: CRF 23 instead of a fixed
+bitrate) are configurable via `ClipWriterConfig`.
+`crates/video-io/tests/write_clips.rs` writes two padded, non-adjacent
+windows from the synthetic `testsrc.mp4` fixture at a downscaled
+resolution and configured bitrate, then re-decodes the output with
+`FrameExtractor` to assert dimensions and non-decreasing timestamps.
 
 To verify the project still builds and the CLI still works after a
 change, use the `/run-offload` skill (`.claude/skills/run-offload/`)
@@ -128,6 +143,17 @@ clean with no warnings.
   ...)`** (it expects `to_*` methods to take `&self`, like
   `to_string`). Name frame-conversion helpers something else (e.g.
   `build_frame`) instead of `to_frame`.
+- **Assigning encoder frame pts in millisecond units (with a `1/1000`
+  encoder time base) causes libx264 to reject the stream** once
+  B-frames are in play: rescaling 30fps source timestamps to ms
+  truncates, so two consecutive frames can round to the same
+  millisecond, producing a duplicate/non-strictly-increasing pts.
+  x264's frame-reordering lookahead then computes a non-monotonic dts
+  and the muxer errors with `Encode("Invalid argument")`. Fix: set the
+  encoder's time base to `1/fps` (`Rational(frame_rate.denominator(),
+  frame_rate.numerator())`) and assign pts as a plain incrementing
+  `i64` frame counter — exact integer ticks, never duplicated. See
+  `ClipWriter::write` in `crates/video-io/src/lib.rs`.
 
 ## Conventions
 
