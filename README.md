@@ -10,7 +10,7 @@ You provide a full game video. Offload pauses early in the run to let you identi
 
 ## Status
 
-🚧 **Pre-development.** Architecture and specification are complete. Build not yet started.
+🚧 **In development.** Architecture and specification are complete. Project skeleton and video I/O (frame extraction + clip assembly) are done — player detection is next. See [CLAUDE.md](./CLAUDE.md#current-state) for the current build state.
 
 ---
 
@@ -63,10 +63,14 @@ ollama pull llava
 
 ```
 offload run     --input <video>  [--output <video>]
-                [--config <path>] [--debug] [--dry-run]
+                [--config <path>] [--debug] [--dry-run] [--no-cache]
 
-offload inspect --input <video>                        # annotated frame dump
-offload cache   --clear                                # wipe intermediate results
+offload inspect --input <video>  [--duration <secs>] [--output-dir <dir>]
+                [--config <path>]                       # annotated frame dump
+
+offload cache   --clear  [--input <video>]              # wipe intermediate results
+
+offload models  [--download] [--list]                   # model management
 ```
 
 Full option reference: see [SPEC.md](./SPEC.md#cli).
@@ -100,7 +104,7 @@ See [SPEC.md](./SPEC.md) for functional requirements, pipeline behaviour, input/
 | Phase | Description | Status |
 |---|---|---|
 | 0 | Project skeleton & tooling | ✅ |
-| 1 | Video I/O (extraction & compilation) | ⬜ |
+| 1 | Video I/O (extraction & compilation) | ✅ |
 | 2 | Player detection (YOLOv8 + ONNX) | ⬜ |
 | 3 | Multi-object tracking (ByteTrack) | ⬜ |
 | 4 | Player re-identification (OSNet) | ⬜ |
