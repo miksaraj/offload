@@ -9,7 +9,8 @@ building it.
 ## Before every push / PR
 
 Before pushing or opening a PR, reflect on the session's work and
-update this file and any `.claude/skills/*` if they're now stale:
+update this file, `README.md`, `SPEC.md`/`ARCHITECTURE.md`, and any
+`.claude/skills/*` if they're now stale:
 
 - Did the **build-phase state** below move on (a phase landed, a stub
   became real)? Update "Current state."
@@ -24,9 +25,34 @@ update this file and any `.claude/skills/*` if they're now stale:
   that makes `.claude/skills/run-offload/SKILL.md` or `smoke.sh`
   inaccurate? Update and re-run the skill to verify it still passes
   before committing it.
+- Does **`README.md`** (status badge, roadmap table, CLI reference,
+  quick start) still match reality? It's user-facing, so it drifts
+  silently — nothing fails CI when it's wrong. Check it every time,
+  not just when something feels off.
+- Do **`SPEC.md`** and **`ARCHITECTURE.md`** still describe the system
+  accurately? They're the design source of truth this file and
+  `README.md` build on — if a phase changed the actual shape of a
+  type, crate boundary, or pipeline stage from what they describe,
+  update them too. They drift less often than `README.md` (design vs.
+  status), but check both on any change that touches design, not only
+  status.
+- **Reflect explicitly: did anything this session involve research,
+  trial-and-error, or a non-obvious fix that would otherwise be
+  re-derived from scratch next time?** If so, it belongs in a skill or
+  in this file *now*, before pushing — not "maybe later." The cost of
+  re-discovering the same API quirk, build gotcha, or workflow twice
+  is the exact waste this checklist exists to prevent.
 
 Skip silently if nothing changed — don't pad these docs with no-op
 edits, and don't write speculative entries for work you haven't done.
+
+As skills and context grow, prefer splitting into separate, focused
+Markdown files referenced from a hub file (this one, `README.md`)
+rather than letting any single file grow unbounded. Not worth
+restructuring preemptively while everything still fits comfortably —
+but when a section here gets long enough that finding things in it
+gets slow, that's the signal to split it out rather than letting it
+keep growing.
 
 ## Current state
 
