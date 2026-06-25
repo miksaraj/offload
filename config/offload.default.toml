@@ -29,11 +29,32 @@ high_confidence_threshold = 0.6
 low_confidence_threshold  = 0.1
 max_lost_frames           = 30    # frames before a lost track is removed
 
+[segmentation]
+# Enable heuristic match-boundary auto-detection (no-op if `segments` is set below)
+enabled                    = false
+# Minimum stretch of near-empty pitch before it's considered a gap between matches
+min_gap_ms                 = 90000
+# Detected-player count at or below this is considered "empty pitch"
+empty_pitch_threshold      = 2
+# Discard candidate segments shorter than this (treated as noise, not a match)
+min_segment_duration_ms    = 180000
+# Manual segments, e.g. for a known tournament running order. Overrides auto-detection.
+# Times are "HH:MM:SS" against the source video timeline.
+# segments = [
+#   { start = "00:00:00", end = "00:32:10", label = "Pool vs Avengers 7s" },
+#   { start = "00:58:40", end = "01:30:05", label = "Pool vs Harlequins 7s" },
+# ]
+
 [reid]
 # How many candidate frames to extract for interactive identification
 candidate_frame_count    = 3
-# How many seconds into the video to look for candidate frames
+# How many seconds into the target segment to look for candidate frames
 candidate_window_secs    = 300
+# Optional: timestamp (seconds into the whole video) used to pick the target
+# segment for identification, for cases where the subject isn't visible until
+# partway through (subbed on mid-game, or first appears in a later match of a
+# tournament stream). Unset = use the first segment (or whole video).
+# candidate_window_start_secs = 3520
 # How many seconds to pre-scan for confirmation after identification
 confirmation_scan_secs   = 60
 # Max re-identification attempts before exiting with error
@@ -64,6 +85,7 @@ output_preset          = "medium"
 # audio_track = "music.mp3"      # optional background music
 music_volume           = 0.25    # background music relative volume (0.0-1.0)
 music_only             = false   # replace match audio with music track
+split_output_per_segment = false # write one output file per match instead of one combined file
 
 [cache]
 enabled = true

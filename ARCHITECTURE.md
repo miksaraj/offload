@@ -98,6 +98,7 @@ The brain of the system. Contains no domain logic itself — only orchestration.
 - Manages the intermediate cache (read/write JSON at each stage boundary)
 - Propagates the `tracing` subscriber to all crates
 - Exposes the `Pipeline` struct that `main.rs` calls
+- Derives the `Vec<MatchSegment>` for the run — either from manual config, from a heuristic gap-detection pass over cached detection counts, or (the common case) an implicit single segment spanning the whole video — and threads it into ReID's identification windowing and into moment grouping/compilation boundary checks
 
 ### `video-io`
 
@@ -192,7 +193,14 @@ INPUT
   → Cached to: cache/tracks.json
       │
       ▼
+[pipeline-core] Match segmentation (multi-match inputs only; no-op by default)
+  → Manual segments from config, or heuristic gap-detection over detection counts
+  → Vec<MatchSegment> { start_ms, end_ms, label }
+  → Cached to: cache/segments.json
+      │
+      ▼
 [reid] Interactive identification (Sub-phase 4A)
+  ⟳ Target segment selected (first segment, or the one containing candidate_window_start_secs)
   ⟳ Candidate frames extracted → detected → annotated JPEG saved
   ⟳ System image viewer opened → user selects bounding box number
   ⟳ Reference embedding generated from selected crop
@@ -212,15 +220,17 @@ INPUT
   → kind: "highlight" | "lowlight" | "neutral"
   → Highlights: positive plays (try, carry, tackle won, turnover won)
   → Lowlights: error events (missed tackle, knock-on, penalty, turnover lost)
-  → Grouped into: Vec<Moment> { start_ms, end_ms, kind, label }
+  → Grouped into: Vec<Moment> { start_ms, end_ms, kind, label, segment }
+  → Same-kind merge never bridges a MatchSegment boundary
   → Cached to: cache/moments.json
       │
       ▼
 [compiler] Video assembly
-  → ClipSpec per moment (with padding)
+  → ClipSpec per moment (with padding, clamped to the moment's segment bounds)
   → Transition effects between clips
   → Event label overlays
   → Optional background audio mix
+  → Optional: one output file per segment instead of one combined file
       │
       ▼
 OUTPUT
@@ -231,11 +241,26 @@ OUTPUT
 
 When the subject's track is lost (goes to `Lost` state — e.g. tackled to ground, leaves frame) and later a new track appears that could be the subject re-entering, the ReID matcher is re-queried. If similarity exceeds the re-entry threshold, the new track is assigned as the subject and tracking continues. This prevents the subject from "disappearing" after a tackle or ruck.
 
+The same mechanism handles longer absences without any special-casing: a sub coming on mid-match, or a player going on/off repeatedly in 7s/touch, is just a longer-than-usual `Lost` state followed by re-entry — re-entry has no upper bound on gap length, only on similarity. The one place that *does* need special-casing is a multi-match input (see "Match segmentation" below): identity must not be assumed to carry across a match boundary by track continuity, since the subject may legitimately not appear in a later match at all.
+
+### Match segmentation
+
+A `MatchSegment` is a time range within the source video treated as a self-contained match. By default there is exactly one implicit segment spanning the whole video, so single-match inputs (the common case) are unaffected. For multi-match inputs (a tournament livestream, or to point identification at a specific point in a long file), `pipeline-core` derives an explicit `Vec<MatchSegment>` from manual config or from a heuristic pass over Stage 2's detection counts (looking for sustained stretches of near-zero detections — broadcast cut away from an active game).
+
+Segments are deliberately *not* derived from a dedicated ML model (e.g. scoreboard OCR or scene-cut detection): the detection-count signal is already computed for every frame by Stage 2, so the heuristic is a few lines of analysis over existing cached data rather than a new model, new dependency, or extra inference pass. The tradeoff is that it only detects boundaries marked by a visible break in play (teams off the pitch) — a tournament feed that cuts hard from one match's final whistle straight into the next kickoff with players still milling around would not produce a clean gap. Manual `segmentation.segments` config is the fallback for those cases, and is the recommended path whenever the user already knows their team's kickoff times.
+
 ---
 
 ## 5. Core Data Types
 
 ```rust
+// pipeline-core
+pub struct MatchSegment {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub label: Option<String>,
+}
+
 // video-io
 pub struct Frame {
     pub timestamp_ms: u64,
@@ -291,6 +316,7 @@ pub struct Moment {
     pub kind: MomentKind,
     pub peak_score: f32,
     pub label: String,
+    pub segment: Option<MatchSegment>,   // None when segmentation is inactive
 }
 
 pub enum MomentKind {
@@ -361,7 +387,8 @@ Cache lives at `<output_dir>/.offload_cache/<input_video_hash>/`.
 |---|---|---|
 | `detections.json` | `Vec<(frame_number, Vec<Detection>)>` | Input video or detection config changes |
 | `tracks.json` | `Vec<(frame_number, Vec<Track>)>` | Detections or tracker config changes |
-| `identity.json` | `{ subject_track_id, confidence_history }` | Tracks or reference image changes |
+| `segments.json` | `Vec<MatchSegment>` | Detections or `segmentation` config changes |
+| `identity.json` | `{ subject_track_id, confidence_history }` | Tracks, segments, or reference image changes |
 | `moments.json` | `Vec<Moment>` | Identity, classifier config, or prompt changes |
 
 Cache validity is checked by hashing the inputs (video file, reference image, relevant config section) and comparing against a stored manifest. Stale cache entries are automatically discarded.
@@ -413,6 +440,10 @@ This distinction is especially important for lowlights: a lowlight is not a prol
 ### Why separate `reid` and `tracker` crates?
 
 Tracker = geometric identity (IoU-based bbox association). ReID = appearance identity (embedding similarity). They solve different subproblems and can be tuned independently. Keeping them separate also makes it straightforward to swap either implementation — e.g. upgrading to a newer ReID model — without touching the other.
+
+### Why is match segmentation a no-op by default rather than always-on?
+
+The v1 design (single 80-minute XV match) doesn't need segmentation at all, and most users never will — heuristic gap-detection adds a chance of misfiring (a long lineout/injury stoppage in a single match could in theory look like a between-matches gap if thresholds are misconfigured). Making it opt-in (`segmentation.enabled` or a manual `segments` list) keeps the default path exactly as simple and predictable as it is today, and confines the new complexity — and its failure modes — to the tournament/sub use case that actually needs it.
 
 ---
 
