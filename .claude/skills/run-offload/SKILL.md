@@ -23,9 +23,23 @@ sudo apt-get install -y libavutil-dev libavformat-dev libavfilter-dev \
   pkg-config ffmpeg
 ```
 
-`ort` (ONNX Runtime) is still not wired in — `detector`/`reid` don't need
-any system libs yet. When a later phase adds it, update this section
-with the exact prerequisite and re-verify this skill.
+Phase 2a wired `ort` (ONNX Runtime) into `detector`. It's built with the
+`load-dynamic` feature (the default `download-binaries` feature fetches a
+prebuilt library from `cdn.pyke.io`, which this project's egress policy
+blocks) so the ONNX Runtime shared library is loaded at runtime via
+`ORT_DYLIB_PATH` instead of linked at build time. Fetch it from
+`microsoft/onnxruntime`'s GitHub releases and point the env var at it
+before building/running/testing anything that touches `detector`:
+
+```bash
+curl -sSL -o /tmp/onnxruntime.tgz \
+  https://github.com/microsoft/onnxruntime/releases/download/v1.24.4/onnxruntime-linux-x64-1.24.4.tgz
+tar -xzf /tmp/onnxruntime.tgz -C /tmp
+export ORT_DYLIB_PATH=/tmp/onnxruntime-linux-x64-1.24.4/lib/libonnxruntime.so
+```
+
+The `detector` crate's tests also need the actual model weights —
+run `models/download.sh` once to fetch `models/yolov8n.onnx`.
 
 ## Build
 
@@ -97,6 +111,20 @@ internal range-padding/clamping/merging logic directly.
   return `Ok(())` — only `run` currently exercises a real error path
   (missing input file → exit 1). Don't assume a clean exit means a
   stage actually did something; check the log output too.
+- **`ort` v2.0.0-rc.12 fails to compile with `default-features =
+  false` unless `api-24` is explicitly re-added.** Without it you get
+  `no field SessionOptionsAppendExecutionProvider_VitisAI on type
+  &'static OrtApi` from `ort`'s `src/ep/vitis.rs` — that module is
+  gated on `feature = "load-dynamic"` alone (not the separate `vitis`
+  EP feature), so enabling `load-dynamic` without `api-24` compiles a
+  call to a struct field that only exists when `api-24` is on. See the
+  workspace `Cargo.toml`'s `ort` dependency.
+- **`ort::session::Session::run` takes `&mut self`.** `Detector::new`'s
+  warm-up call therefore needs `session` to be `mut`, and the
+  `SessionOutputs` it returns borrows `session` — `drop` it explicitly
+  before moving `session` into the `Detector` struct, or the compiler
+  rejects the move with `E0505`. See `Detector::new` in
+  `crates/detector/src/lib.rs`.
 - **CI (`.github/workflows/ci.yml`) runs `fmt --check`, `clippy -D
   warnings`, `build`, and `test`** on every push to `main` and every
   PR. Run this skill's smoke script (and `cargo clippy --workspace

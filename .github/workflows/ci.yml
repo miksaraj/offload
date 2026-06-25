@@ -25,6 +25,16 @@ jobs:
             libavdevice-dev libswscale-dev libswresample-dev libavcodec-dev \
             pkg-config ffmpeg
 
+      - name: Install ONNX Runtime shared library
+        run: |
+          curl -sSL -o onnxruntime.tgz \
+            https://github.com/microsoft/onnxruntime/releases/download/v1.24.4/onnxruntime-linux-x64-1.24.4.tgz
+          tar -xzf onnxruntime.tgz
+          echo "ORT_DYLIB_PATH=$PWD/onnxruntime-linux-x64-1.24.4/lib/libonnxruntime.so" >> "$GITHUB_ENV"
+
+      - name: Download ONNX models
+        run: models/download.sh
+
       - name: cargo fmt --check
         run: cargo fmt --all --check
 

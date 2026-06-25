@@ -101,6 +101,28 @@ To verify the project still builds and the CLI still works after a
 change, use the `/run-offload` skill (`.claude/skills/run-offload/`)
 rather than re-deriving build/run commands from scratch.
 
+Phase 2a (ONNX Runtime setup & model loading) is complete: `detector`
+(`crates/detector/src/lib.rs`) loads a YOLOv8 ONNX model via `ort`,
+built with the `load-dynamic` feature so the ONNX Runtime shared
+library is `dlopen`ed at runtime from `ORT_DYLIB_PATH` rather than
+linked at build time (see "Deliberately deferred dependencies" and
+Gotchas). `Detector::new` loads the model and runs a zeroed warm-up
+inference so the first real call isn't paying for lazy init.
+`preprocess` letterboxes a `Frame` to `640x640` (aspect-preserving
+resize + grey padding, not a naive stretch — see SPEC.md), normalises
+`u8 [0,255] -> f32 [0,1]`, and reorders `HWC -> NCHW`.
+`Detector::run_inference` runs that tensor through the model, logs the
+raw output shape, and returns it undecoded; `Detector::detect` calls
+`run_inference` then errors with an explicit "Phase 2b" message since
+NMS/decoding isn't implemented yet. `models/download.sh` now actually
+fetches `models/yolov8n.onnx` (pinned to the `ultralytics/assets` GitHub
+release `v8.4.0`, SHA256-verified) instead of being a no-op stub.
+`crates/detector/tests/run_inference.rs` runs real inference on a
+synthetic non-square frame and asserts the YOLOv8n output shape
+(`[1, 84, 8400]`), and asserts `detect` still reports the Phase 2b
+error. `detector` isn't wired into `pipeline-core`/the `offload` CLI
+yet — that's Phase 2b once postprocessing exists.
+
 ## Deliberately deferred dependencies
 
 `ffmpeg-next` landed in `video-io`'s `Cargo.toml` in Phase 1a (see
@@ -111,13 +133,21 @@ rather than re-deriving build/run commands from scratch.
 in `.github/workflows/ci.yml`). `compiler` will need it too for Phase
 7's output assembly, but hasn't been wired up yet.
 
-`ort` (ONNX Runtime) is **not yet** in any `Cargo.toml`, even though
-ARCHITECTURE.md's dependency map lists it for `detector`/`reid`. It's a
-sys-binding crate that links against the ONNX Runtime shared library at
-build time, which isn't installed in a bare container — adding it
-before it's needed would break `cargo build` for anyone without that
-lib. Add it when implementing Phase 2a/4a, and at that point also add
-the real prerequisite to `.claude/skills/run-offload/SKILL.md` and CI.
+`ort` (ONNX Runtime) landed in `detector`'s `Cargo.toml` in Phase 2a
+(see "Current state"), with `default-features = false, features =
+["std", "ndarray", "load-dynamic", "api-24"]` in the workspace
+`Cargo.toml`. `load-dynamic` instead of the default
+`download-binaries` is deliberate: `download-binaries` fetches a
+prebuilt ONNX Runtime library from `cdn.pyke.io` at build time, and
+that host is blocked by this project's egress policy. `load-dynamic`
+defers loading the shared library to runtime via `dlopen`
+(`ort::init_from(path)?.commit()`, called once from
+`detector::ensure_ort_initialized`), reading the path from
+`ORT_DYLIB_PATH` — see `.claude/skills/run-offload/SKILL.md`'s
+"Prerequisites" for how to fetch that library (from
+`microsoft/onnxruntime`'s GitHub releases, which isn't blocked) and
+point the env var at it. `reid` will need `ort` too for Phase 4a, with
+the same feature set.
 
 Similarly, `reqwest`/`tokio`/`serde_json` are already wired into
 `classifier`'s `Cargo.toml` (pure-Rust, no system deps, safe to add
@@ -126,12 +156,15 @@ early) but unused until Phase 5's Ollama client lands.
 ## CI
 
 `.github/workflows/ci.yml` runs on every push to `main` and every PR:
-`cargo fmt --all --check`, `cargo clippy --workspace --all-targets --
--D warnings`, `cargo build --workspace`, `cargo test --workspace`, in
-that order, on `ubuntu-latest` with `Swatinem/rust-cache` for
-dependency caching. All four checks were run locally against the
-current scaffold before this workflow was added — fmt/clippy are
-clean with no warnings.
+installs FFmpeg dev libs, downloads the ONNX Runtime shared library
+from `microsoft/onnxruntime`'s GitHub releases and exports
+`ORT_DYLIB_PATH` (`$GITHUB_ENV`) so later steps pick it up, runs
+`models/download.sh` to fetch `yolov8n.onnx`, then `cargo fmt --all
+--check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo build --workspace`, `cargo test --workspace`, in that order, on
+`ubuntu-latest` with `Swatinem/rust-cache` for dependency caching. All
+four checks were run locally against the current scaffold before this
+workflow was added — fmt/clippy are clean with no warnings.
 
 ## Gotchas
 
@@ -180,6 +213,30 @@ clean with no warnings.
   frame_rate.numerator())`) and assign pts as a plain incrementing
   `i64` frame counter — exact integer ticks, never duplicated. See
   `ClipWriter::write` in `crates/video-io/src/lib.rs`.
+- **`cdn.pyke.io` (ort's default binary CDN) is blocked by the egress
+  policy.** `ort`'s default `download-binaries` feature fetches a
+  prebuilt ONNX Runtime library from there at build time, which fails
+  with a 403 in this environment. Use `default-features = false` with
+  `load-dynamic` instead, and source the shared library separately
+  (e.g. `microsoft/onnxruntime`'s GitHub releases, which isn't
+  blocked) — see "Deliberately deferred dependencies."
+- **`ort` v2.0.0-rc.12 with `default-features = false` won't compile
+  unless `api-24` is also enabled.** `src/ep/vitis.rs` gates its FFI
+  call on `feature = "load-dynamic"` alone, not the separate `vitis`
+  EP feature — so `load-dynamic` without `api-24` compiles a reference
+  to `OrtApi::SessionOptionsAppendExecutionProvider_VitisAI`, a field
+  that only exists in the `api-24` struct bindings, producing
+  `error[E0609]: no field ... on type &'static OrtApi`. Fix: include
+  `api-24` alongside `load-dynamic` in the workspace `Cargo.toml`'s
+  `ort` features.
+- **`ort::session::Session::run` takes `&mut self`,** so any method
+  that runs inference (`Detector::new`'s warm-up, `run_inference`)
+  needs a `mut` binding/`&mut self`. The `SessionOutputs` a `run` call
+  returns holds a borrow of the session — if you need to move the
+  session afterwards (e.g. into a struct), `drop` the outputs first or
+  the compiler rejects the move with `E0505: cannot move out of
+  ... because it is borrowed`. See `Detector::new` in
+  `crates/detector/src/lib.rs`.
 
 ## Conventions
 
