@@ -479,5 +479,7 @@ Shared across all crates:
 
 External runtime dependencies (not Rust crates — must be installed on host):
 - `ffmpeg` ≥ 6.0 (system library, linked by `ffmpeg-next`)
-- `onnxruntime` shared library (bundled by `ort` crate by default)
+- `onnxruntime` shared library (loaded at runtime via `ORT_DYLIB_PATH`;
+  see CLAUDE.md's "Deliberately deferred dependencies" for why `ort`'s
+  default bundling is disabled in this project)
 - `ollama` binary running locally on port 11434
