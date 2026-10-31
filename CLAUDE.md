@@ -111,17 +111,71 @@ inference so the first real call isn't paying for lazy init.
 `preprocess` letterboxes a `Frame` to `640x640` (aspect-preserving
 resize + grey padding, not a naive stretch — see SPEC.md), normalises
 `u8 [0,255] -> f32 [0,1]`, and reorders `HWC -> NCHW`.
-`Detector::run_inference` runs that tensor through the model, logs the
-raw output shape, and returns it undecoded; `Detector::detect` calls
-`run_inference` then errors with an explicit "Phase 2b" message since
-NMS/decoding isn't implemented yet. `models/download.sh` now actually
+`Detector::run_inference` runs that tensor through the model and
+returns the raw output undecoded. `models/download.sh` now actually
 fetches `models/yolov8n.onnx` (pinned to the `ultralytics/assets` GitHub
 release `v8.4.0`, SHA256-verified) instead of being a no-op stub.
-`crates/detector/tests/run_inference.rs` runs real inference on a
-synthetic non-square frame and asserts the YOLOv8n output shape
-(`[1, 84, 8400]`), and asserts `detect` still reports the Phase 2b
-error. `detector` isn't wired into `pipeline-core`/the `offload` CLI
-yet — that's Phase 2b once postprocessing exists.
+
+Phase 2b (detection postprocessing) is complete. `decode_output` takes
+the `[1, 84, N]` tensor; each anchor's best class must be person (0)
+with a score of at least `confidence_threshold`, following ultralytics'
+single-label behaviour. YOLOv8 has no objectness row, so the class
+score is the confidence. Greedy `nms` at `nms_iou_threshold` runs in
+letterbox space, keeping at most `MAX_DETECTIONS` (300). Survivors are
+then mapped back through `LetterboxTransform::to_source`, which undoes
+the padding and scale and clamps to the frame, so `Detection.bbox` is
+in source-frame pixels (top-left `x`/`y`). `Detector::detect` chains
+all of this. `draw_detections` draws boxes shaded red (low confidence)
+to green (high) for debug frames.
+
+`pipeline-core` gained a `[detector]` config section
+(`DetectorSection`: thresholds only; `execution_provider` isn't read
+yet, so it's always CPU) and `Pipeline::inspect`, which backs
+`offload inspect`: resolve the source (URLs work), sample frames at
+`video.detection_fps` by timestamp, detect, and write
+`frame_<n>_<ms>ms.jpg` annotated frames. There's no tracking yet, and
+frames aren't normalised to `video.working_*`, because the detector
+letterboxes any resolution anyway. `run` still stops after Stage 0.
+
+Testing: `models/download.sh` also fetches `models/samples/bus.jpg`
+(ultralytics' demo photo, AGPL, so not committed; it's gitignored).
+`crates/detector/tests/run_inference.rs` asserts YOLOv8n finds exactly
+the reference 4 people in it, and that a blank frame produces none.
+`detector`'s unit tests cover decode, NMS, IoU and letterbox mapping on
+hand-built tensors.
+
+**Real-footage check (user's ~25 s club rugby clip).** This is the same
+clip as in Phase 1a: 706x848 portrait, with the actual picture in a band
+from rows 265 to 583 and black bars above and below. `offload inspect`
+over the whole clip: clearly visible players and the referee get tight,
+confident boxes, with no false positives seen. Distant packs and the
+edges of rucks are under-detected (frame 0: 2 boxes for about 20
+players). Mean person boxes per frame, measured at 1 fps over the clip:
+
+| | threshold 0.40 (original default) | threshold 0.25 (new default) |
+|---|---|---|
+| full frame | 7.6 | 9.6 |
+| black bars cropped | 8.2 | 10.3 |
+
+On the 3 s wide shot it went from 4 boxes to 16, and every one of the
+16 at crop + 0.25 was checked by eye as a real person. As a result,
+`detector.confidence_threshold` now defaults to **0.25**: the 0.4
+originally written into SPEC didn't hold up on real footage, and the
+user's stated rule is that a guessed value gets corrected when reality
+disagrees. `bus.jpg` still gives exactly its 4 people at 0.25. Two
+follow-ups for Phase 3:
+1. **ByteTrack needs the low-confidence boxes that the detector still
+   throws away.** `tracker.low_confidence_threshold = 0.1` has no
+   effect while the detector drops everything below
+   `detector.confidence_threshold` (0.25). Have the detector emit down
+   to the tracker's low threshold, and apply `confidence_threshold`
+   only where a "sure" detection is needed (identification candidates,
+   debug frames).
+2. **Auto-crop letterbox/pillarbox black bars** before detection, as
+   part of Stage 1 frame normalisation (which isn't implemented yet),
+   mapping boxes back by the crop offset. It helps most on wide shots.
+   This departs from SPEC (a new normalisation step), so it wasn't
+   folded into 2b.
 
 Phase 1c (URL / YouTube source input) is complete: SPEC.md Stage 0,
 in `crates/video-io/src/source.rs`. `resolve_source(input, &SourceConfig,
