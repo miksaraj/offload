@@ -1,25 +1,26 @@
 //! Player re-identification via OSNet, with an interactive identification phase.
 //!
-//! Real embedding inference (backed by `ort`) and crop preprocessing (backed
-//! by `image`) land in Phase 4; this crate currently exposes the stable
-//! types and API surface other crates depend on.
+//! Phase 4a: [`ReIdModel`] — OSNet-x1.0 appearance embeddings for player
+//! crops (see [`embedding`]). Interactive identification (4b), confirmation
+//! and matching (4c) and temporal smoothing (4d) are still stubs below.
 
+pub mod embedding;
+
+pub use embedding::{crop, Embedding, ReIdModel};
 use thiserror::Error;
 use video_io::Frame;
 
 #[derive(Debug, Error)]
 pub enum ReIdError {
-    #[error("model not found: {0}")]
+    #[error("model not found: {0} (run models/download.sh to fetch it)")]
     ModelNotFound(String),
+    #[error("reid inference error: {0}")]
+    Inference(String),
     #[error("identification error: {0}")]
     Identification(String),
 }
 
 pub type Result<T> = std::result::Result<T, ReIdError>;
-
-/// A 512-dim appearance feature vector.
-#[derive(Debug, Clone)]
-pub struct Embedding(pub Vec<f32>);
 
 #[derive(Debug, Clone)]
 pub struct ReIdConfig {
@@ -47,20 +48,6 @@ impl Default for ReIdConfig {
             reentry_vote_window: 5,
             max_identification_frame: 600,
         }
-    }
-}
-
-/// Loads the OSNet ONNX model and produces appearance embeddings for crops.
-pub struct ReIdModel {
-    #[allow(dead_code)]
-    model_path: String,
-}
-
-impl ReIdModel {
-    pub fn new(model_path: impl Into<String>) -> Result<Self> {
-        Ok(Self {
-            model_path: model_path.into(),
-        })
     }
 }
 

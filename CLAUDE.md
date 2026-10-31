@@ -222,6 +222,43 @@ theirs for all 40 frames, and the person leaving at the left edge stays
 `Tracked` on sub-0.4 boxes (the second association on real detector
 output) until they're out of view.
 
+Phase 4a (ReID embeddings) is complete, in `crates/reid/src/embedding.rs`.
+`ReIdModel` loads OSNet-x1.0 (see ARCHITECTURE §6 for the model's
+source, I/O and licence). It shares `detector::ensure_ort_initialized`,
+which is now public, so there's a single ONNX Runtime init per process.
+`embed_crops` and `embed_boxes` embed every crop in **one batched**
+inference; batch dimension N is dynamic. Crops are stretched to
+128×256, RGB, ImageNet-normalised, then L2-normalised; `cosine` is a
+dot product. `crate::crop` copies the box out of a `Frame`, clamped.
+`Identifier`/`ReIdMatcher` are still stubs (4b–4d).
+`crates/reid/tests/embed_real_crops.rs` uses real YOLOv8n boxes on
+`bus.jpg`: the same person under box jitter scores 0.89–0.92, different
+people 0.35–0.37, and batched output equals one-at-a-time output.
+
+**Real-footage ReID measurement (user's 25 s clip, tracked players
+≥ 40 px tall, 8 fps): appearance alone barely separates same-kit
+teammates here.** Cosine similarity:
+
+| pair | median | p5–p95 |
+|---|---|---|
+| different players, same frame | 0.54 | 0.39–0.73 |
+| same player, 0.125 s apart | 0.90 | 0.74–0.98 |
+| same player, 1 s apart | 0.78 | 0.56–0.93 |
+| same player, 3 s apart | 0.73 | 0.45–0.90 |
+| 10-sample means: same track early vs late | 0.77 | 0.53–0.89 |
+| 10-sample means: different tracks | 0.66 | 0.50–0.83 |
+
+RGB beat BGR: different-player mean 0.545 vs 0.586, with same-player
+similarity equal. That confirmed the channel order. Caveats: the clip
+is low-res (706 px wide), and "different tracks" includes some
+same-person pairs split across IDs, which inflates that row. **SPEC's
+`reid.lock_threshold = 0.72` / `reentry_threshold = 0.68` sit inside the
+overlap, so absolute thresholds alone won't work for 4c/4d.** Re-entry
+needs relative evidence (best candidate vs runner-up margin over a vote
+window) and spatial/temporal plausibility, with the tracker's own ID
+continuity as the primary identity signal. Settle that design with the
+user before building 4c/4d.
+
 Phase 1c (URL / YouTube source input) is complete: SPEC.md Stage 0,
 in `crates/video-io/src/source.rs`. `resolve_source(input, &SourceConfig,
 cache_root)` passes local paths through unchanged (missing path →
@@ -271,8 +308,8 @@ defers loading the shared library to runtime via `dlopen`
 `ORT_DYLIB_PATH` — see `.claude/skills/run-offload/SKILL.md`'s
 "Prerequisites" for how to fetch that library (from
 `microsoft/onnxruntime`'s GitHub releases, which isn't blocked) and
-point the env var at it. `reid` will need `ort` too for Phase 4a, with
-the same feature set.
+point the env var at it. `reid` uses `ort` too (since Phase 4a), with
+the same feature set and the shared init.
 
 `yt-dlp` (Phase 1c) is an optional *runtime* tool, not a crate. It's
 only needed for URL inputs, and its path comes from `source.ytdlp_path`.
@@ -393,6 +430,21 @@ It's a compile-time proc-macro pulled in through `image` → `ravif` →
   real binary is available from `yt-dlp/yt-dlp`'s GitHub releases
   (`yt-dlp_linux`, standalone, no Python needed), which aren't blocked:
   useful for checking that it accepts an argument list.
+- **Hugging Face and Google Drive are blocked by the egress policy**
+  (`curl` gets `000`), and that's where torchreid's OSNet weights and
+  most mirrors live. GitHub *release asset* downloads work, even though
+  `api.github.com` refuses repos outside this session's scope. Find
+  model files by guessing or searching for release-asset URLs instead
+  (the OSNet ONNX came from PINTO0309's BoT-SORT-ONNX-TensorRT
+  release). To inspect an ONNX file's I/O, use a scratch venv
+  (`python3 -m venv … && pip install onnx`; PyPI works).
+- **`imageops::crop_imm(&buf, ..).to_image()` on an `ImageBuffer<_,
+  &[u8]>` borrowed from a `Frame` fails with `E0521` ("borrowed data
+  escapes")** when returned from a function: the result's type is tied
+  to the borrow. Copy the pixels out with `RgbImage::from_fn` instead
+  (see `reid::crop`).
+- **ndarray's `ArrayViewD` row (from `axis_iter`) has no `to_vec()`**;
+  use `.iter().copied().collect()`.
 - **YouTube video IDs are case-sensitive.** An early filename
   sanitiser lowercased them, so `youtube-dQw4w9WgXcQ.mp4` was written
   as `youtube-dqw4w9wgxcq.mp4` and the offline cache lookup (which uses

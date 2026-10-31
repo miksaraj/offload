@@ -357,7 +357,10 @@ pub fn draw_label(
 /// `ort`'s `load-dynamic` feature (used because the default `download-binaries`
 /// feature fetches a prebuilt library from a CDN this project can't assume is
 /// reachable) has no built-in env var fallback — see CLAUDE.md's Gotchas.
-fn ensure_ort_initialized() -> Result<()> {
+///
+/// Public so other ONNX-backed crates (`reid`) share the same one-time
+/// process-wide initialisation instead of racing to commit their own.
+pub fn ensure_ort_initialized() -> Result<()> {
     static INIT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
     INIT.get_or_init(|| {
         let dylib_path = std::env::var("ORT_DYLIB_PATH").map_err(|_| {

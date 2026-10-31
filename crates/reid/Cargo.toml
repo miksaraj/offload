@@ -6,5 +6,9 @@ license.workspace = true
 
 [dependencies]
 video-io.workspace = true
+detector.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+ort.workspace = true
+ndarray.workspace = true
+image.workspace = true

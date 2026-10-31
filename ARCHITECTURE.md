@@ -138,8 +138,9 @@ ByteTrack multi-object tracking, implemented in pure Rust.
 
 Player re-identification via OSNet ONNX model, with an interactive identification phase.
 
-- `ReIdModel::new(model_path)`: loads model
-- `ReIdModel::embed(crop: &RgbImage) -> Embedding`: preprocesses a bounding-box crop and produces a 512-dim feature vector
+- `ReIdModel::new(model_path)`: loads the model (sharing `detector::ensure_ort_initialized`) and warms it up
+- `ReIdModel::embed_crops(&[RgbImage]) -> Vec<Embedding>` / `embed_boxes(frame, &[Rect])`: preprocesses crops and embeds them in **one batched inference** (all players in a frame at once)
+- `Embedding`: L2-normalised 512-dim vector; `cosine` is a dot product; `Embedding::mean` gives the normalised mean of several (for vote windows)
 
 **Interactive identification (`Identifier` struct):**
 - `Identifier::select_candidate_frame(video, detector, config) -> (Frame, Vec<Detection>)`: extracts `candidate_frame_count` frames from the first `candidate_window_secs` of the video, runs detection on each, returns the frame with the most detections
@@ -386,12 +387,12 @@ Start with `yolov8n` (nano) for speed; upgrade to `yolov8s` (small) if detection
 |---|---|
 | Model | OSNet-x1.0 |
 | Format | ONNX |
-| Input | `[1, 3, 256, 128]` float32, ImageNet normalised |
-| Output | `[1, 512]` float32 embedding vector |
-| Source | Export from torchreid, or find community ONNX export |
+| Input | `base_images`: `[N, 3, 256, 128]` float32 (dynamic batch), RGB, ImageNet mean/std normalised by the caller (the export's first layer is a plain `Conv`) |
+| Output | `features`: `[N, 512]` float32 (post-ReLU; L2-normalised by `reid`) |
+| Source | torchreid OSNet-x1.0 trained on MSMT17 (`combineall`), exported to ONNX by PINTO0309 for BoT-SORT-ONNX-TensorRT and published as a GitHub release asset; `models/download.sh` pins it by SHA-256. The weights inherit MSMT17's research/non-commercial terms, which is fine for Offload's personal-use scope but worth knowing |
 | Runtime | `ort` crate |
 
-The 256×128 input is the standard ReID crop size. Bounding box crops from YOLO/tracker output must be resized to this before inference.
+The 256×128 input is the standard ReID crop size. Bounding box crops from YOLO/tracker output are stretched to this (not letterboxed, matching how OSNet was trained) before inference. RGB channel order was confirmed empirically: on real footage it separates same-player from different-player pairs better than BGR does.
 
 ### Ollama Vision Model (Classification)
 
@@ -503,7 +504,7 @@ offload (binary)
     │   ├── nalgebra (Kalman filter matrices)
     │   └── image (debug drawing)
     ├── reid
-    │   ├── ort
+    │   ├── ort (via detector's shared runtime init)
     │   ├── ndarray
     │   └── image (crop/resize)
     ├── classifier
