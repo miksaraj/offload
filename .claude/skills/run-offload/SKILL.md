@@ -118,10 +118,31 @@ filtered out). It also writes `$TMPDIR/offload_detector_frames/bus_annotated.jpg
 for a visual check. `detector`'s `#[cfg(test)]` module covers decode,
 NMS, IoU and letterbox mapping on hand-built tensors.
 
+`crates/tracker/` has unit tests for the Kalman filter (learns a
+constant velocity and coasts through occlusion, smooths jitter), for
+assignment (global optimum, cost limit applied inside the
+optimisation), and for ByteTrack scenarios (crossing players,
+occlusion recovery, low-confidence boxes keeping a track alive,
+one-frame false positives never getting IDs, expiry, no ID reuse).
+`tests/track_real_detections.rs` runs real YOLOv8n output over a
+simulated pan across `bus.jpg`: 4 people, exactly 4 IDs. It takes
+about 20 s in a debug build. Set `TRACE_TRACKS=1` to print every
+track, every frame.
+
 **Visual check on real footage:** `RUST_LOG=info ./target/debug/offload
 inspect -i <clip or URL> -d 10 -o /tmp/inspect` writes one annotated
-JPEG per frame sampled at `video.detection_fps` (default 8). Boxes
-shade from red (low confidence) to green (high).
+JPEG per frame sampled at `video.detection_fps` (default 8), showing
+tracked players. Each track ID has its own colour and a numeric label,
+so an ID switch shows up as a colour/number change; `Lost` tracks are
+thin boxes at their predicted position. The summary line reports
+tracked players per frame and the number of distinct IDs. **Use a
+release build for whole clips or parameter sweeps:** about 20 s for
+199 frames, against about 2 min in debug. Point `-c` at a scratch
+`offload.toml` with an absolute `models.detector` path when running
+from another directory. To grep the per-frame `RUST_LOG=pipeline_core=debug`
+fields (`detections=`, `tracked=`), strip ANSI colour first with
+`sed 's/\x1b\[[0-9;]*m//g'`: tracing colours the field names, so a
+plain grep on them matches nothing.
 
 ## Gotchas
 

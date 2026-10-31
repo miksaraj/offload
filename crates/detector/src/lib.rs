@@ -265,7 +265,8 @@ pub fn draw_detections(frame: &Frame, detections: &[Detection]) -> RgbImage {
     img
 }
 
-fn draw_rect(img: &mut RgbImage, r: &Rect, thickness: u32, colour: Rgb<u8>) {
+/// Draws `r`'s outline, `thickness` px wide, clipped to the image.
+pub fn draw_rect(img: &mut RgbImage, r: &Rect, thickness: u32, colour: Rgb<u8>) {
     let (w, h) = img.dimensions();
     if w == 0 || h == 0 {
         return;
@@ -283,6 +284,69 @@ fn draw_rect(img: &mut RgbImage, r: &Rect, thickness: u32, colour: Rgb<u8>) {
         for y in y0..=y1 {
             for x in [x0.saturating_add(t).min(x1), x1.saturating_sub(t).max(x0)] {
                 img.put_pixel(x, y, colour);
+            }
+        }
+    }
+}
+
+/// 3×5 bitmap glyphs for `0`–`9`; each row's low 3 bits are pixels, MSB
+/// on the left. Enough for track IDs and Phase 4b's numbered boxes
+/// without pulling in a font-rendering crate.
+const DIGITS: [[u8; 5]; 10] = [
+    [0b111, 0b101, 0b101, 0b101, 0b111],
+    [0b010, 0b110, 0b010, 0b010, 0b111],
+    [0b111, 0b001, 0b111, 0b100, 0b111],
+    [0b111, 0b001, 0b111, 0b001, 0b111],
+    [0b101, 0b101, 0b111, 0b001, 0b001],
+    [0b111, 0b100, 0b111, 0b001, 0b111],
+    [0b111, 0b100, 0b111, 0b101, 0b111],
+    [0b111, 0b001, 0b001, 0b001, 0b001],
+    [0b111, 0b101, 0b111, 0b101, 0b111],
+    [0b111, 0b101, 0b111, 0b001, 0b111],
+];
+
+/// Draws `text` (digits only; anything else renders as a blank cell) with
+/// its top-left at `(x, y)`, on a filled `bg` box with a 1-cell margin.
+/// Each font pixel is `scale`×`scale` image pixels. Clipped to the image.
+pub fn draw_label(
+    img: &mut RgbImage,
+    x: i64,
+    y: i64,
+    text: &str,
+    fg: Rgb<u8>,
+    bg: Rgb<u8>,
+    scale: u32,
+) {
+    let scale = i64::from(scale.max(1));
+    let (w, h) = (i64::from(img.width()), i64::from(img.height()));
+    let mut put = |px: i64, py: i64, c: Rgb<u8>| {
+        if (0..w).contains(&px) && (0..h).contains(&py) {
+            img.put_pixel(px as u32, py as u32, c);
+        }
+    };
+    let chars = text.chars().count() as i64;
+    let box_w = (chars * 4 + 1) * scale;
+    let box_h = 7 * scale;
+    for py in y..y + box_h {
+        for px in x..x + box_w {
+            put(px, py, bg);
+        }
+    }
+    for (i, ch) in text.chars().enumerate() {
+        let Some(glyph) = ch.to_digit(10).map(|d| DIGITS[d as usize]) else {
+            continue;
+        };
+        let gx = x + (1 + 4 * i as i64) * scale;
+        let gy = y + scale;
+        for (row, bits) in glyph.iter().enumerate() {
+            for col in 0..3 {
+                if bits & (0b100 >> col) != 0 {
+                    for dy in 0..scale {
+                        for dx in 0..scale {
+                            put(gx + col * scale + dx, gy + row as i64 * scale + dy, fg);
+                        }
+                    }
+                }
             }
         }
     }
@@ -526,6 +590,21 @@ mod tests {
         let raw = ArrayD::<f32>::zeros(vec![1, 4, 10]);
         let t = LetterboxTransform::for_frame(640, 640);
         assert!(decode_output(raw.view(), &t, &DetectorConfig::default()).is_err());
+    }
+
+    #[test]
+    fn draw_label_renders_digit_glyphs_on_a_background_box() {
+        let mut img: RgbImage = ImageBuffer::from_pixel(20, 10, Rgb([9, 9, 9]));
+        let (fg, bg) = (Rgb([255, 255, 255]), Rgb([0, 0, 0]));
+        draw_label(&mut img, 0, 0, "1", fg, bg, 1);
+        // Box is 5x7 at scale 1; "1" has its stem at glyph column 1.
+        assert_eq!(*img.get_pixel(0, 0), bg);
+        assert_eq!(*img.get_pixel(2, 1), fg); // top of the stem
+        assert_eq!(*img.get_pixel(1, 1), bg); // left of the stem, row 0
+        assert_eq!(*img.get_pixel(1, 2), fg); // the "1"'s flag
+        assert_eq!(*img.get_pixel(6, 0), Rgb([9, 9, 9])); // outside the box
+                                                          // Off-image positions don't panic.
+        draw_label(&mut img, 18, 8, "42", fg, bg, 2);
     }
 
     #[test]

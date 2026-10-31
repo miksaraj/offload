@@ -98,16 +98,16 @@ Every later stage works on a local file. This stage turns whatever the user pass
 **Input:** per-frame `Vec<Detection>`  
 **Output:** per-frame `Vec<Track>` with stable `track_id` values
 
-ByteTrack algorithm:
+ByteTrack algorithm (one update per *sampled* frame; detections arrive with the detector's emission floor lowered to `tracker.low_confidence_threshold` so the second association has boxes to use):
 
-1. For each new frame, predict next position of all existing tracks via Kalman filter
-2. Compute IoU matrix between predicted track positions and new high-confidence detections (confidence ≥ `tracker.high_confidence_threshold`, default: 0.6)
-3. Run Hungarian algorithm on high-confidence detections; assign matched detections to tracks
-4. For unmatched tracks, attempt second-stage matching against low-confidence detections (confidence between `tracker.low_confidence_threshold` and high threshold, default: 0.1–0.6)
-5. Unmatched tracks after both stages move to `Lost` state
-6. Tracks in `Lost` state for more than `tracker.max_lost_frames` (default: 30) frames are removed
-7. Unmatched high-confidence detections with no existing track create new `Track` objects
-8. Track IDs are monotonically increasing integers; never reused within a run
+1. For each new frame, predict next position of all existing tracks via a constant-velocity Kalman filter over `(cx, cy, aspect, height)`, with noise scaled by box height
+2. Compute an IoU cost matrix (`1 − IoU`) between predicted positions of all confirmed tracks (`Tracked` and `Lost`) and high-confidence detections (confidence ≥ `tracker.high_confidence_threshold`, default: 0.4, lowered from an initial 0.6 that left about 40% of detected players untracked on real club footage)
+3. Solve it optimally (Hungarian algorithm), never matching a pair with IoU ≤ 0.2. The limit is enforced inside the optimisation, not by filtering afterwards. A matched `Lost` track is re-activated with its old ID
+4. For tracks still unmatched *and currently `Tracked`*, run a second association against low-confidence detections (confidence between `tracker.low_confidence_threshold` and the high threshold, default: 0.1–0.4), requiring IoU > 0.5
+5. Tracks unmatched after both stages move to `Lost`; their box keeps coasting on the predicted motion
+6. Tracks in `Lost` state for more than `tracker.max_lost_frames` (default: 30 sampled frames, ≈3.75 s at 8 fps) are removed
+7. Leftover high-confidence detections scoring at least the high threshold + 0.1 start a new track. Except on the first frame, a new track is *unconfirmed* until it matches again on the next frame (IoU > 0.3), and is discarded otherwise, so a one-frame false positive never gets an ID. Low-confidence detections never start tracks
+8. Track IDs are monotonically increasing integers from 1; never reused within a run. Each update returns the confirmed tracks that are `Tracked` or `Lost`
 
 ### Stage 3.5 — Match Segmentation (multi-match inputs only)
 
@@ -300,7 +300,7 @@ Options:
 
 ### `offload inspect`
 
-Debug utility: runs detection (and, from Phase 3, tracking) on the first N seconds of a video, sampled at `video.detection_fps` (for a URL input, the full video is downloaded first so a later `run` can reuse it), and dumps annotated frames, without running ReID or classification. Useful for verifying detection quality before a full run.
+Debug utility: runs detection and tracking on the first N seconds of a video, sampled at `video.detection_fps` (for a URL input, the full video is downloaded first so a later `run` can reuse it), and dumps annotated frames, without running ReID or classification. Useful for verifying detection quality before a full run.
 
 ```
 offload inspect [OPTIONS] --input <FILE|URL>
@@ -417,7 +417,7 @@ Total: 2 highlights, 1 lowlight across 2 matches | Est. output: 6m 12s
 When `--debug` is passed, writes annotated JPEG frames to `./debug/<stage>/`:
 
 - `debug/detection/` — bounding boxes on raw detections
-- `debug/tracking/` — track IDs per bounding box, coloured by state
+- `debug/tracking/` — track IDs per bounding box, each track drawn in its own stable colour (so an ID switch shows as a colour change); `Lost` tracks as a thin box at their predicted position
 - `debug/reid/` — cosine similarity score per track overlaid, subject highlighted in green
 - `debug/classification/` — sampled frames with score and event label overlaid
 
@@ -467,7 +467,7 @@ nms_iou_threshold    = 0.45
 execution_provider   = "cpu"
 
 [tracker]
-high_confidence_threshold = 0.6
+high_confidence_threshold = 0.4
 low_confidence_threshold  = 0.1
 max_lost_frames           = 30    # frames before a lost track is removed
 

@@ -43,20 +43,24 @@ fn main() -> Result<()> {
             tracing::info!(?input, duration, ?output_dir, ?config, "offload inspect");
             let pipeline = Pipeline::new(Config::load(&config).unwrap_or_default());
             let s = pipeline.inspect(&input, duration, &output_dir)?;
-            let mean = if s.frames_processed == 0 {
-                0.0
-            } else {
-                s.total_detections as f64 / s.frames_processed as f64
+            let per_frame = |n: usize| {
+                if s.frames_processed == 0 {
+                    0.0
+                } else {
+                    n as f64 / s.frames_processed as f64
+                }
             };
             println!(
-                "Inspected {} frames: {} person detections ({mean:.1}/frame), {} frames with none. \
-                 Annotated frames in {}",
+                "Inspected {} frames: {} person detections ({:.1}/frame), {} frames with none; \
+                 {:.1} tracked players/frame across {} track IDs. Annotated frames in {}",
                 s.frames_processed,
                 s.total_detections,
+                per_frame(s.total_detections),
                 s.frames_without_detections,
+                per_frame(s.total_tracked),
+                s.unique_track_ids,
                 s.output_dir.display()
             );
-            tracing::warn!("tracking is not yet implemented; inspect shows detections only");
         }
         Command::Cache { clear, input } => {
             tracing::info!(clear, ?input, "offload cache");

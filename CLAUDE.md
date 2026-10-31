@@ -133,9 +133,10 @@ to green (high) for debug frames.
 yet, so it's always CPU) and `Pipeline::inspect`, which backs
 `offload inspect`: resolve the source (URLs work), sample frames at
 `video.detection_fps` by timestamp, detect, and write
-`frame_<n>_<ms>ms.jpg` annotated frames. There's no tracking yet, and
-frames aren't normalised to `video.working_*`, because the detector
-letterboxes any resolution anyway. `run` still stops after Stage 0.
+`frame_<n>_<ms>ms.jpg` annotated frames (since Phase 3 it tracks too;
+see below). Frames aren't normalised to `video.working_*`, because the
+detector letterboxes any resolution anyway. `run` still stops after
+Stage 0.
 
 Testing: `models/download.sh` also fetches `models/samples/bus.jpg`
 (ultralytics' demo photo, AGPL, so not committed; it's gitignored).
@@ -162,20 +163,64 @@ On the 3 s wide shot it went from 4 boxes to 16, and every one of the
 `detector.confidence_threshold` now defaults to **0.25**: the 0.4
 originally written into SPEC didn't hold up on real footage, and the
 user's stated rule is that a guessed value gets corrected when reality
-disagrees. `bus.jpg` still gives exactly its 4 people at 0.25. Two
-follow-ups for Phase 3:
-1. **ByteTrack needs the low-confidence boxes that the detector still
-   throws away.** `tracker.low_confidence_threshold = 0.1` has no
-   effect while the detector drops everything below
-   `detector.confidence_threshold` (0.25). Have the detector emit down
-   to the tracker's low threshold, and apply `confidence_threshold`
-   only where a "sure" detection is needed (identification candidates,
-   debug frames).
-2. **Auto-crop letterbox/pillarbox black bars** before detection, as
-   part of Stage 1 frame normalisation (which isn't implemented yet),
-   mapping boxes back by the crop offset. It helps most on wide shots.
-   This departs from SPEC (a new normalisation step), so it wasn't
-   folded into 2b.
+disagrees. `bus.jpg` still gives exactly its 4 people at 0.25.
+Black-bar cropping was considered and **rejected**: that clip's
+portrait-with-bars format is a one-off, not representative of the
+footage Offload is meant for (the user's call), so there's no
+letterbox auto-crop step.
+
+Phase 3 (tracking) is complete, in `crates/tracker/`:
+- `kalman.rs` (3a): a port of ByteTrack's constant-velocity Kalman
+  filter over `(cx, cy, aspect, height)`, with noise scaled by box
+  height, using `nalgebra` fixed-size matrices (f64).
+- `assignment.rs`: exact Hungarian assignment with a cost limit applied
+  *inside* the optimisation. The matrix is padded with dummy
+  rows/columns at `limit/2`, the same as `lap.lapjv(extend_cost=True)`.
+  Filtering an unconstrained solution afterwards gives different, worse
+  matches; a unit test covers this.
+- `lib.rs` (3b): ByteTrack proper. Confirmed and lost tracks are matched
+  against high-confidence boxes (IoU > 0.2); still-`Tracked` leftovers
+  against low-confidence boxes (IoU > 0.5); last frame's new tracks
+  against leftover high boxes (IoU > 0.3), discarding any unmatched
+  one; then new tracks from boxes scoring at least high + 0.1; expiry
+  after `max_lost_frames`. These IoU limits and the 0.1 margin are
+  ByteTrack's reference constants, kept as named consts rather than
+  config. `update` returns confirmed `Tracked`/`Lost` tracks sorted by
+  ID. IDs start at 1 and are never reused. `Track` gained
+  `confidence`; it does **not** carry a bbox history (ARCHITECTURE
+  updated): Phase 4 can keep per-frame track lists itself.
+- `draw_tracks` and `track_colour`: a stable colour per ID, with an ID
+  label drawn by `detector::draw_label`, a 3×5 bitmap digit font added
+  to `detector` (reusable for Phase 4b's numbered boxes; no font crate).
+  `detector::draw_rect` is now public.
+- `Config::detector_config_for_tracking()` lowers the detector's
+  emission floor to `tracker.low_confidence_threshold` (0.1), which was
+  the Phase 2b follow-up. `inspect` now detects, tracks and draws
+  tracks, and reports tracked players per frame and the number of
+  distinct IDs.
+
+**`tracker.high_confidence_threshold` is now 0.4, not the 0.6 in the
+SPEC draft** (ByteTrack's MOT17 value). YOLOv8n scores distant players
+around 0.3–0.6, and new tracks need high + 0.1. Sweep over the user's
+25 s clip (199 frames at 8 fps, 10.0 detections per frame):
+
+| high | tracked/frame | IDs | mean frames per ID |
+|---|---|---|---|
+| 0.6 | 6.0 | 33 | 36 |
+| 0.5 | 6.8 | 38 | 36 |
+| **0.4** | **7.9** | **43** | **37** |
+| 0.3 | 9.1 | 56 | 32 |
+
+At 0.4, IDs were checked by eye over a 1.1 s stretch with a camera pan
+and a ruck, and every player kept their ID. A padded goalpost is
+detected and tracked as a person (a detector false positive, harmless
+since the user picks themselves in Phase 4).
+`crates/tracker/tests/track_real_detections.rs` runs real YOLOv8n
+detections through the tracker over a simulated pan across `bus.jpg`:
+four people get exactly four IDs, the two fully visible people keep
+theirs for all 40 frames, and the person leaving at the left edge stays
+`Tracked` on sub-0.4 boxes (the second association on real detector
+output) until they're out of view.
 
 Phase 1c (URL / YouTube source input) is complete: SPEC.md Stage 0,
 in `crates/video-io/src/source.rs`. `resolve_source(input, &SourceConfig,
@@ -196,7 +241,7 @@ from the URL offline (`youtube_video_id`), so a cache hit never runs
 `pipeline_core::Config::source`. `--input` is now a `String` (not
 `PathBuf`) on `run`/`inspect`/`cache`. `Pipeline::run` resolves the
 source and then still returns "not yet implemented". `inspect`
-accepts a URL but doesn't resolve it yet, since it's still a stub.
+resolves URLs the same way (since Phase 2b).
 `crates/video-io/tests/resolve_source.rs` tests against a fake
 `yt-dlp` shell script, because YouTube is blocked by the egress
 policy (see Gotchas). The real binary was only checked for argument
@@ -234,6 +279,11 @@ only needed for URL inputs, and its path comes from `source.ytdlp_path`.
 `video-io` gained `serde`/`serde_json` (sidecar and yt-dlp metadata
 JSON) and `sha2` (sidecar checksum); `sha2` is a new workspace
 dependency.
+
+`nalgebra` (Phase 3, pure Rust, `default-features = false` +
+`std`) is used by `tracker` for the Kalman filter's 8×8 / 4×4 matrices
+and Cholesky solve. `tracker` also uses `image` for `draw_tracks`, and
+takes `video-io` as a dev-dependency for its real-detection test.
 
 Similarly, `reqwest`/`tokio`/`serde_json` are already wired into
 `classifier`'s `Cargo.toml` (pure-Rust, no system deps, safe to add
