@@ -89,7 +89,7 @@ Every later stage works on a local file. This stage turns whatever the user pass
 
 - Run YOLOv8 ONNX inference on each frame
 - Preprocessing: resize to 640×640 with letterbox padding, normalise pixel values to `[0.0, 1.0]`, convert `HWC u8` to `NCHW f32`
-- Postprocessing: decode `[1, 84, 8400]` output tensor, apply confidence threshold (default: 0.4), apply NMS (IoU threshold default: 0.45), filter to class 0 (person) only
+- Postprocessing: decode `[1, 84, 8400]` output tensor; each anchor takes its highest-scoring class (YOLOv8 has no separate objectness score) and is kept only if that class is 0 (person) and the score meets the confidence threshold (default: 0.4); apply greedy NMS (IoU threshold default: 0.45, at most 300 boxes per frame)
 - Scale bounding boxes back to original frame pixel coordinates after NMS
 - Frames with zero detections are recorded as empty; they do not halt the pipeline
 
@@ -300,7 +300,7 @@ Options:
 
 ### `offload inspect`
 
-Debug utility: runs detection and tracking on the first N seconds of a video (for a URL input, the full video is downloaded first so a later `run` can reuse it) and dumps annotated frames, without running ReID or classification. Useful for verifying detection quality before a full run.
+Debug utility: runs detection (and, from Phase 3, tracking) on the first N seconds of a video, sampled at `video.detection_fps` (for a URL input, the full video is downloaded first so a later `run` can reuse it), and dumps annotated frames, without running ReID or classification. Useful for verifying detection quality before a full run.
 
 ```
 offload inspect [OPTIONS] --input <FILE|URL>

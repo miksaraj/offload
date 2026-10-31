@@ -119,6 +119,8 @@ Runs YOLOv8 inference via `ort` (ONNX Runtime Rust bindings).
 - `Detector::detect(frame) -> Vec<Detection>`: preprocesses frame, runs inference, decodes output tensor, applies NMS, filters to person class only
 - Preprocessing: resize to 640×640, normalise `[0, 255] → [0.0, 1.0]`, `HWC → NCHW` layout
 - Output decoding: parses `[1, 84, 8400]` tensor, extracts `xywh` boxes + confidence + class scores
+- `LetterboxTransform`: records the letterbox scale and padding so boxes map back to source-frame pixels after NMS
+- `draw_detections(frame, detections) -> RgbImage`: annotated debug frame (used by `offload inspect` and, later, `--debug`)
 
 ### `tracker`
 

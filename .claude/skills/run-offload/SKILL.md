@@ -38,8 +38,9 @@ tar -xzf /tmp/onnxruntime.tgz -C /tmp
 export ORT_DYLIB_PATH=/tmp/onnxruntime-linux-x64-1.24.4/lib/libonnxruntime.so
 ```
 
-The `detector` crate's tests also need the actual model weights —
-run `models/download.sh` once to fetch `models/yolov8n.onnx`.
+The `detector` crate's tests also need the actual model weights and a
+sample image. Run `models/download.sh` once to fetch
+`models/yolov8n.onnx` and `models/samples/bus.jpg`.
 
 ## Build
 
@@ -55,9 +56,11 @@ cargo build --workspace
 
 This builds the workspace, then runs `offload --help`, `--version`,
 `run` (with a missing input, expecting the "input video not found"
-error and exit 1), `inspect`, `cache --clear`, `models --download`
-(all currently stubs, expecting exit 0 with a "not yet implemented"
-warning logged), and `run` with no `--input` (expecting a clap usage
+error and exit 1), `inspect` (missing input → exit 1; on the fixture
+clip → exit 0 and annotated `frame_*.jpg` files written — needs
+`ORT_DYLIB_PATH` and `models/yolov8n.onnx`), `cache --clear`,
+`models --download` (stubs, expecting exit 0 with a "not yet
+implemented" warning logged), and `run` with no `--input` (expecting a clap usage
 error, exit 2) — then runs `cargo test --workspace`. It prints
 `ok`/`FAIL` per check and a pass/fail summary line; exits non-zero if
 anything failed.
@@ -106,6 +109,19 @@ errors; and `remove_cached_source`. To try the CLI by hand with a URL,
 put an `offload.toml` with `[source] ytdlp_path = "/path/to/fake"` in
 the working directory. `cache` has no `--config` flag and always reads
 `./offload.toml`.
+`crates/detector/tests/run_inference.rs` runs real YOLOv8n inference.
+It checks the raw `[1, 84, 8400]` shape, that a blank frame produces
+no detections, and that `bus.jpg` produces exactly the 4 people in
+ultralytics' reference output (confidences about 0.90/0.88/0.87, plus
+0.42 for the person cut off at the left edge; the bus itself is
+filtered out). It also writes `$TMPDIR/offload_detector_frames/bus_annotated.jpg`
+for a visual check. `detector`'s `#[cfg(test)]` module covers decode,
+NMS, IoU and letterbox mapping on hand-built tensors.
+
+**Visual check on real footage:** `RUST_LOG=info ./target/debug/offload
+inspect -i <clip or URL> -d 10 -o /tmp/inspect` writes one annotated
+JPEG per frame sampled at `video.detection_fps` (default 8). Boxes
+shade from red (low confidence) to green (high).
 
 ## Gotchas
 
@@ -115,8 +131,8 @@ the working directory. `cache` has no `--config` flag and always reads
   name resolution. Destructure it under another name (e.g.
   `debug: debug_mode`) before logging it. See
   `crates/offload/src/main.rs`'s `Command::Run` arm.
-- **Stub stages report success (exit 0), not failure.** `inspect`,
-  `cache`, and `models` are unimplemented stubs that log a `WARN` and
+- **Stub stages report success (exit 0), not failure.** `cache` and
+  `models` are unimplemented stubs that log a `WARN` and
   return `Ok(())` — only `run` currently exercises a real error path
   (missing input file → exit 1). Don't assume a clean exit means a
   stage actually did something; check the log output too.

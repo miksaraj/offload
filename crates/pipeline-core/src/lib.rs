@@ -21,6 +21,10 @@ pub enum PipelineError {
     #[error("stage error: {0}")]
     Stage(String),
     #[error(transparent)]
+    Detector(#[from] detector::DetectorError),
+    #[error("writing {0}: {1}")]
+    Output(PathBuf, String),
+    #[error(transparent)]
     Source(VideoIoError),
 }
 
@@ -89,6 +93,34 @@ impl Default for VideoConfig {
     }
 }
 
+/// `[detector]` section. `execution_provider` from SPEC.md §6 isn't read
+/// yet: inference always runs on the CPU provider.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct DetectorSection {
+    pub confidence_threshold: f32,
+    pub nms_iou_threshold: f32,
+}
+
+impl Default for DetectorSection {
+    fn default() -> Self {
+        let d = detector::DetectorConfig::default();
+        Self {
+            confidence_threshold: d.confidence_threshold,
+            nms_iou_threshold: d.nms_iou_threshold,
+        }
+    }
+}
+
+impl From<&DetectorSection> for detector::DetectorConfig {
+    fn from(s: &DetectorSection) -> Self {
+        Self {
+            confidence_threshold: s.confidence_threshold,
+            nms_iou_threshold: s.nms_iou_threshold,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct CacheConfig {
@@ -113,7 +145,17 @@ pub struct Config {
     pub ollama: OllamaConfig,
     pub source: SourceConfig,
     pub video: VideoConfig,
+    pub detector: DetectorSection,
     pub cache: CacheConfig,
+}
+
+/// What `offload inspect` processed.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct InspectSummary {
+    pub frames_processed: usize,
+    pub total_detections: usize,
+    pub frames_without_detections: usize,
+    pub output_dir: PathBuf,
 }
 
 impl Config {
@@ -140,6 +182,65 @@ impl Pipeline {
         let source = self.resolve_source(input)?;
         tracing::info!(path = %source.path.display(), origin = ?source.origin, "source resolved");
         Err(PipelineError::Stage("not yet implemented".into()))
+    }
+
+    /// `offload inspect`: resolve the source, then run detection on the
+    /// first `duration_secs` of it, sampled at `video.detection_fps`,
+    /// writing one annotated JPEG per sampled frame to `output_dir`.
+    /// Tracking joins this in Phase 3.
+    pub fn inspect(
+        &self,
+        input: &str,
+        duration_secs: u32,
+        output_dir: &Path,
+    ) -> Result<InspectSummary> {
+        let source = self.resolve_source(input)?;
+        let mut detector =
+            detector::Detector::new(&self.config.models.detector, (&self.config.detector).into())?;
+        std::fs::create_dir_all(output_dir)
+            .map_err(|e| PipelineError::Output(output_dir.to_path_buf(), e.to_string()))?;
+
+        let end_ms = u64::from(duration_secs) * 1000;
+        let interval_ms = 1000.0 / f64::from(self.config.video.detection_fps.max(1));
+        let mut next_sample_ms = 0.0_f64;
+        let mut summary = InspectSummary {
+            output_dir: output_dir.to_path_buf(),
+            ..InspectSummary::default()
+        };
+
+        for frame in video_io::FrameExtractor::new(&source.path)? {
+            if frame.timestamp_ms >= end_ms {
+                break;
+            }
+            if (frame.timestamp_ms as f64) < next_sample_ms {
+                continue;
+            }
+            while next_sample_ms <= frame.timestamp_ms as f64 {
+                next_sample_ms += interval_ms;
+            }
+
+            let detections = detector.detect(&frame)?;
+            tracing::debug!(
+                frame = frame.frame_number,
+                timestamp_ms = frame.timestamp_ms,
+                detections = detections.len(),
+                "inspected frame"
+            );
+            let path = output_dir.join(format!(
+                "frame_{:06}_{:08}ms.jpg",
+                frame.frame_number, frame.timestamp_ms
+            ));
+            detector::draw_detections(&frame, &detections)
+                .save(&path)
+                .map_err(|e| PipelineError::Output(path.clone(), e.to_string()))?;
+
+            summary.frames_processed += 1;
+            summary.total_detections += detections.len();
+            if detections.is_empty() {
+                summary.frames_without_detections += 1;
+            }
+        }
+        Ok(summary)
     }
 
     /// Stage 0: turn `--input` into a local file, downloading URL sources

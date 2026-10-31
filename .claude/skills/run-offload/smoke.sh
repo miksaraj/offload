@@ -56,7 +56,11 @@ contains "--help lists models"            "models"     "$BIN" --help
 check    "--version exits 0"               0            "$BIN" --version
 check    "run with missing input exits 1"  1            "$BIN" run --input /tmp/offload-smoke-does-not-exist.mp4
 contains "run with missing input reports it" "input video not found" "$BIN" run --input /tmp/offload-smoke-does-not-exist.mp4
-check    "inspect exits 0 (stub)"          0            "$BIN" inspect --input /tmp/offload-smoke-does-not-exist.mp4
+check    "inspect with missing input exits 1" 1         "$BIN" inspect --input /tmp/offload-smoke-does-not-exist.mp4
+INSPECT_DIR="$(mktemp -d)"
+check    "inspect on fixture exits 0"      0            "$BIN" inspect --input crates/video-io/tests/fixtures/testsrc.mp4 --duration 1 --output-dir "$INSPECT_DIR"
+contains "inspect on fixture writes annotated frames" "frame_000000_00000000ms.jpg" ls "$INSPECT_DIR"
+rm -rf "$INSPECT_DIR"
 check    "cache --clear exits 0 (stub)"    0            "$BIN" cache --clear
 check    "models --download exits 0 (stub)" 0           "$BIN" models --download
 check    "run with no --input fails to parse" 2          "$BIN" run
