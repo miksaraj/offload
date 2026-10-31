@@ -133,9 +133,10 @@ to green (high) for debug frames.
 yet, so it's always CPU) and `Pipeline::inspect`, which backs
 `offload inspect`: resolve the source (URLs work), sample frames at
 `video.detection_fps` by timestamp, detect, and write
-`frame_<n>_<ms>ms.jpg` annotated frames. There's no tracking yet, and
-frames aren't normalised to `video.working_*`, because the detector
-letterboxes any resolution anyway. `run` still stops after Stage 0.
+`frame_<n>_<ms>ms.jpg` annotated frames (since Phase 3 it tracks too;
+see below). Frames aren't normalised to `video.working_*`, because the
+detector letterboxes any resolution anyway. `run` still stops after
+Stage 0.
 
 Testing: `models/download.sh` also fetches `models/samples/bus.jpg`
 (ultralytics' demo photo, AGPL, so not committed; it's gitignored).
@@ -240,7 +241,7 @@ from the URL offline (`youtube_video_id`), so a cache hit never runs
 `pipeline_core::Config::source`. `--input` is now a `String` (not
 `PathBuf`) on `run`/`inspect`/`cache`. `Pipeline::run` resolves the
 source and then still returns "not yet implemented". `inspect`
-accepts a URL but doesn't resolve it yet, since it's still a stub.
+resolves URLs the same way (since Phase 2b).
 `crates/video-io/tests/resolve_source.rs` tests against a fake
 `yt-dlp` shell script, because YouTube is blocked by the egress
 policy (see Gotchas). The real binary was only checked for argument
