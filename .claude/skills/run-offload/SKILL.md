@@ -60,7 +60,7 @@ This builds the workspace, then runs `offload --help`, `--version`,
 error and exit 1), `inspect` (missing input → exit 1; on the fixture
 clip → exit 0 and annotated `frame_*.jpg` files written — needs
 `ORT_DYLIB_PATH` and `models/yolov8n.onnx`), `cache --clear`,
-`models --download` (stubs, expecting exit 0 with a "not yet
+`run` on the fixture clip (no people → "no players detected"), `models --download` (stubs, expecting exit 0 with a "not yet
 implemented" warning logged), and `run` with no `--input` (expecting a clap usage
 error, exit 2) — then runs `cargo test --workspace`. It prints
 `ok`/`FAIL` per check and a pass/fail summary line; exits non-zero if
@@ -134,6 +134,18 @@ track, every frame.
 crops from `bus.jpg` with OSNet: the same person under box jitter
 scores above 0.89, different people around 0.36, and batched output
 matches one-at-a-time output.
+
+`crates/pipeline-core/tests/identify.rs` runs Stage 4A end to end
+(candidate frames, detection, numbered image, scripted terminal input,
+OSNet embedding) on a short video it builds from `bus.jpg` with the
+`ffmpeg` CLI.
+
+**Trying the interactive pick by hand:** `offload run -i <clip>` stops
+at a numbered-boxes prompt and writes `/tmp/offload_select.jpg`
+(`xdg-open` usually isn't available in the container, so read the file
+directly). Script the answers with `printf '3\nblue 4\n' | offload run ...`.
+`run` then stops with "Phase 4c not yet implemented" (exit 1); that's
+expected for now.
 
 **Visual check on real footage:** `RUST_LOG=info ./target/debug/offload
 inspect -i <clip or URL> -d 10 -o /tmp/inspect` writes one annotated

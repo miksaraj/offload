@@ -96,6 +96,12 @@ pub struct FrameExtractor {
 }
 
 impl FrameExtractor {
+    /// Container duration in milliseconds (0 if the container doesn't
+    /// report one).
+    pub fn duration_ms(&self) -> u64 {
+        (self.input_ctx.duration().max(0) as u64) / 1000
+    }
+
     pub fn new(input_path: impl AsRef<Path>) -> Result<Self> {
         let input_path = input_path.as_ref();
         if !input_path.exists() {

@@ -230,10 +230,31 @@ which is now public, so there's a single ONNX Runtime init per process.
 inference; batch dimension N is dynamic. Crops are stretched to
 128×256, RGB, ImageNet-normalised, then L2-normalised; `cosine` is a
 dot product. `crate::crop` copies the box out of a `Frame`, clamped.
-`Identifier`/`ReIdMatcher` are still stubs (4b–4d).
+(`ReIdMatcher` is still a stub for 4c/4d.)
 `crates/reid/tests/embed_real_crops.rs` uses real YOLOv8n boxes on
 `bus.jpg`: the same person under box jitter scores 0.89–0.92, different
 people 0.35–0.37, and batched output equals one-at-a-time output.
+
+Phase 4b (interactive selection) is complete, in
+`crates/reid/src/identify.rs` (see ARCHITECTURE's `reid` section for
+the functions). `Pipeline::identify` in `pipeline-core` decodes forward
+to `reid.candidate_frame_count` timestamps spread across the window
+(`FrameExtractor::duration_ms` is new, used to clip it), detects at
+`detector.confidence_threshold`, and hands off to
+`identify_interactively`. `offload run` now does Stage 0, then this
+prompt on stdin/stdout, prints the pick, and stops with "Phase 4c not
+yet implemented". `[reid]` config is wired (`ReIdSection`, including
+`candidate_window_start_secs`). The old `Identifier` stub is gone;
+`ReIdMatcher` is still a stub. Tests:
+- `identify.rs` unit tests: timestamps, ordering, left-to-right
+  numbering, re-prompting, `n`, EOF abort, descriptor, drawing.
+- `crates/pipeline-core/tests/identify.rs`: end to end on a 2 s video
+  of `bus.jpg`, made at test time with the `ffmpeg` CLI (CI installs
+  it), with scripted input; plus the no-players and abort errors.
+
+Checked on the user's clip with a scripted pick: the frame at 4.1 s
+was offered with 13 readable numbered players, and the goalpost false
+positive wasn't offered.
 
 **Real-footage ReID measurement (user's 25 s clip, tracked players
 ≥ 40 px tall, 8 fps): appearance alone barely separates same-kit
@@ -445,6 +466,10 @@ It's a compile-time proc-macro pulled in through `image` → `ravif` →
   (see `reid::crop`).
 - **ndarray's `ArrayViewD` row (from `axis_iter`) has no `to_vec()`**;
   use `.iter().copied().collect()`.
+- **Integration tests that generate a temp file with a fixed name race
+  each other**: `cargo test` runs tests in a file in parallel. Give each
+  test its own path (see `bus_video(name)` in
+  `crates/pipeline-core/tests/identify.rs`).
 - **YouTube video IDs are case-sensitive.** An early filename
   sanitiser lowercased them, so `youtube-dQw4w9WgXcQ.mp4` was written
   as `youtube-dqw4w9wgxcq.mp4` and the offline cache lookup (which uses

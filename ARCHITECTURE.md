@@ -142,11 +142,15 @@ Player re-identification via OSNet ONNX model, with an interactive identificatio
 - `ReIdModel::embed_crops(&[RgbImage]) -> Vec<Embedding>` / `embed_boxes(frame, &[Rect])`: preprocesses crops and embeds them in **one batched inference** (all players in a frame at once)
 - `Embedding`: L2-normalised 512-dim vector; `cosine` is a dot product; `Embedding::mean` gives the normalised mean of several (for vote windows)
 
-**Interactive identification (`Identifier` struct):**
-- `Identifier::select_candidate_frame(video, detector, config) -> (Frame, Vec<Detection>)`: extracts `candidate_frame_count` frames from the first `candidate_window_secs` of the video, runs detection on each, returns the frame with the most detections
-- `Identifier::annotate_and_prompt(frame, detections) -> usize`: saves annotated JPEG with numbered bounding boxes to `/tmp/offload_select.jpg`, opens system image viewer, reads user integer input from stdin, returns selected detection index
-- `Identifier::confirm(frame, subject_track) -> bool`: saves confirmation frame to `/tmp/offload_confirm.jpg`, opens viewer, prompts `[y/N]`, returns user decision
-- `Identifier::build_reference(frame, detection, model) -> Embedding`: crops the selected detection, resizes to 256×128, runs OSNet inference, returns the reference embedding
+**Interactive identification (`reid::identify` module, Phase 4b):**
+- `candidate_timestamps(start, window, duration, count)`: `count` timestamps at the centres of equal slices of the identification window, clipped to the video
+- `presentation_order(candidates)`: most detections first, ties by time; frames with no detections are dropped
+- `number_detections` + `annotate_numbered(frame, numbered) -> RgbImage`: boxes numbered 1..N left to right, with large bitmap-digit labels
+- `open_in_viewer(path) -> bool`: `open` (macOS) / `xdg-open` (elsewhere); on failure the path is printed for the user to open manually
+- `prompt_choice` / `prompt_descriptor`: terminal prompts over generic `BufRead`/`Write` (scripted in tests). A box number, or `n` to move to the next candidate frame; re-prompts on invalid input; end of input aborts
+- `identify_interactively(candidates, model, options, input, out) -> Selection { frame, bbox, confidence, descriptor, embedding }`: runs the whole loop and embeds the chosen crop as the reference
+- The orchestration (`Pipeline::identify` in `pipeline-core`) extracts the candidate frames and runs detection at `detector.confidence_threshold`, so only "sure" boxes are offered
+- Confirmation (`/tmp/offload_confirm.jpg`, `[y/N]`) is Phase 4c
 
 **Matching (`ReIdMatcher` struct):**
 - `ReIdMatcher::new(reference_embedding, model)`: initialised from the result of `Identifier`

@@ -133,9 +133,9 @@ This stage has two sub-phases: **interactive identification** (run once before t
 
 Before the full video is processed, the pipeline pauses to let the user identify themselves from the actual footage. This is the only input required to identify the subject — no external reference photo is needed.
 
-1. Extract `reid.candidate_frame_count` (default: 3) frames spread across `reid.candidate_window_secs` (default: 300) seconds of footage, starting at the beginning of the **target segment** — the first `MatchSegment` by default, or the segment containing `reid.candidate_window_start_secs` if set (use this when the subject isn't visible until partway through, e.g. subbed on mid-game, or playing in a later game within a tournament stream). When no segmentation is active, the target segment is the whole video, matching today's behaviour.
+1. Extract `reid.candidate_frame_count` (default: 3) frames spread across `reid.candidate_window_secs` (default: 300) seconds of footage (each at the centre of an equal slice of the window, clipped to the video's length, so a short video still gets spread-out candidates), starting at the beginning of the **target segment** — the first `MatchSegment` by default, or the segment containing `reid.candidate_window_start_secs` if set (use this when the subject isn't visible until partway through, e.g. subbed on mid-game, or playing in a later game within a tournament stream). When no segmentation is active, the target segment is the whole video, matching today's behaviour.
 2. Run detection on each candidate frame; select the frame with the most detections (most players visible = easiest to find yourself)
-3. Save an annotated JPEG to a known temporary path (e.g. `/tmp/offload_select.jpg`) with each detected player bounding box labelled with a number (1, 2, 3 …)
+3. Save an annotated JPEG to a known temporary path (e.g. `/tmp/offload_select.jpg`) with each detected player bounding box labelled with a number (1, 2, 3 …), numbered left to right so they're easy to scan. Only detections at or above `detector.confidence_threshold` are offered
 4. Attempt to open the image in the system default viewer:
    - macOS: `open /tmp/offload_select.jpg`
    - Linux: `xdg-open /tmp/offload_select.jpg`
@@ -148,7 +148,7 @@ Before the full video is processed, the pipeline pauses to let the user identify
 
    Enter the number shown on the bounding box that is you: _
    ```
-6. Read the user's integer input; validate it is within range; re-prompt on invalid input
+6. Read the user's integer input; validate it is within range; re-prompt on invalid input. Entering `n` instead shows the next candidate frame (in the same most-players-first order), for when the subject isn't visible or isn't boxed in the current one
 7. Optionally prompt for a jersey descriptor (informational only, stored in cache for display):
    ```
    Enter a jersey descriptor to aid confirmation (e.g. "blue 4") [Enter to skip]: _
