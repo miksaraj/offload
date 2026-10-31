@@ -40,7 +40,8 @@ export ORT_DYLIB_PATH=/tmp/onnxruntime-linux-x64-1.24.4/lib/libonnxruntime.so
 
 The `detector` crate's tests also need the actual model weights and a
 sample image. Run `models/download.sh` once to fetch
-`models/yolov8n.onnx` and `models/samples/bus.jpg`.
+`models/yolov8n.onnx`, `models/osnet_x1_0.onnx` (for `reid`) and
+`models/samples/bus.jpg`.
 
 ## Build
 
@@ -128,6 +129,11 @@ one-frame false positives never getting IDs, expiry, no ID reuse).
 simulated pan across `bus.jpg`: 4 people, exactly 4 IDs. It takes
 about 20 s in a debug build. Set `TRACE_TRACKS=1` to print every
 track, every frame.
+
+`crates/reid/tests/embed_real_crops.rs` embeds real YOLOv8n person
+crops from `bus.jpg` with OSNet: the same person under box jitter
+scores above 0.89, different people around 0.36, and batched output
+matches one-at-a-time output.
 
 **Visual check on real footage:** `RUST_LOG=info ./target/debug/offload
 inspect -i <clip or URL> -d 10 -o /tmp/inspect` writes one annotated

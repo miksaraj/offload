@@ -3,8 +3,13 @@
 # image the detector tests use, into ./models/samples/).
 #
 # yolov8n.onnx is a pre-exported asset from the ultralytics/assets GitHub
-# release — no Python/PyTorch export step needed. osnet_x1_0.onnx is filled
-# in during Phase 4a (no equivalent pre-exported asset exists upstream yet).
+# release — no Python/PyTorch export step needed. osnet_x1_0.onnx is
+# OSNet-x1.0 (torchreid, trained on MSMT17 "combineall") as exported to
+# ONNX by PINTO0309 for BoT-SORT-ONNX-TensorRT, published as a GitHub
+# release asset (torchreid's own weights live on Google Drive and the
+# Hugging Face mirrors are blocked by this project's egress policy).
+# Input `base_images` [N,3,256,128] float32 (RGB, ImageNet-normalised by
+# the caller), output `features` [N,512].
 set -euo pipefail
 
 MODELS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,6 +19,8 @@ YOLO_URL="https://github.com/ultralytics/assets/releases/download/v8.4.0/yolov8n
 YOLO_SHA256="b2bc52f40e8e1c532427d5bde3575a5d5b571b739fab2c6df443733ed1589cbd"
 
 OSNET_MODEL="${MODELS_DIR}/osnet_x1_0.onnx"
+OSNET_URL="https://github.com/PINTO0309/BoT-SORT-ONNX-TensorRT/releases/download/onnx/osnet_x1_0_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0_Nx3x256x128.onnx"
+OSNET_SHA256="65e4b18b8a2e6c6b27d3c7720a15c0d49cfe7b226b6a2250c223fbfd24e991c7"
 
 # Sample image for the detector's real-inference test (Phase 2b): the
 # standard ultralytics demo photo (4 people + a bus). AGPL-licensed like
@@ -51,7 +58,11 @@ fi
 if [[ -f "${OSNET_MODEL}" ]]; then
   echo "✓ osnet_x1_0.onnx already present"
 else
-  echo "✗ osnet_x1_0.onnx missing — TODO: pin a download URL for the OSNet-x1.0 ONNX export (Phase 4a)"
+  echo "Downloading osnet_x1_0.onnx from ${OSNET_URL}..."
+  curl -sSL -o "${OSNET_MODEL}.tmp" "${OSNET_URL}"
+  echo "${OSNET_SHA256}  ${OSNET_MODEL}.tmp" | sha256sum -c -
+  mv "${OSNET_MODEL}.tmp" "${OSNET_MODEL}"
+  echo "✓ osnet_x1_0.onnx downloaded and verified"
 fi
 
 echo
