@@ -2,7 +2,7 @@
 
 **Offload** is a self-hosted, privacy-first CLI tool that automatically identifies and compiles personal highlight and lowlight reels from raw rugby match footage.
 
-You provide a full game video. Offload pauses early in the run to let you identify yourself interactively from an annotated frame extracted from the footage — no reference photo needed. From there it follows you across all 80 minutes and produces a compilation of your key moments — tries, carries, tackles, turnovers — with no manual clipping, no cloud upload, no subscription, and no reliance on club infrastructure.
+You provide a full game video, either a file on disk or a YouTube link. Offload pauses early in the run to let you identify yourself interactively from an annotated frame extracted from the footage — no reference photo needed. From there it follows you across all 80 minutes and produces a compilation of your key moments — tries, carries, tackles, turnovers — with no manual clipping, no cloud upload, no subscription, and no reliance on club infrastructure.
 
 > *In rugby, an offload is a pass made while in the grip of a tackle — getting the ball out of a dangerous situation. This tool offloads the tedious editing work so you can focus on the game.*
 
@@ -16,7 +16,7 @@ You provide a full game video. Offload pauses early in the run to let you identi
 
 ## What it does
 
-1. Extracts frames from your match video
+1. Takes your match video from a local file, or downloads it once from YouTube, then extracts frames from it
 2. Detects all players in each frame using a local YOLOv8 ONNX model
 3. Tracks all detected players across frames using ByteTrack
 4. Pauses to let you **identify yourself interactively** — you pick yourself from an annotated candidate frame extracted from the footage; no reference photo needed
@@ -24,7 +24,7 @@ You provide a full game video. Offload pauses early in the run to let you identi
 6. Scores moments where you are present using a local Ollama vision model, distinguishing **highlights** (positive plays: tries, carries, tackles won, turnovers) from **lowlights** (bad plays: missed tackles, knock-ons, penalties conceded)
 7. Assembles a final compilation video of your highlights and lowlights
 
-Everything runs locally. No data leaves your machine.
+Everything runs locally. No data leaves your machine. A YouTube input is downloaded *to* your machine once; nothing is uploaded anywhere.
 
 ---
 
@@ -35,6 +35,7 @@ Everything runs locally. No data leaves your machine.
 | Rust (stable, ≥ 1.75) | Build toolchain |
 | FFmpeg (≥ 6.0, system install) | Video decoding & encoding |
 | Ollama (local, ≥ 0.1.30) | Vision model inference for highlight classification |
+| yt-dlp (optional) | Downloading the source video when `--input` is a YouTube URL — not needed for local files |
 | ONNX model files | YOLOv8 (detection) + OSNet (ReID) — see setup |
 
 ---
@@ -55,6 +56,9 @@ ollama pull llava
 
 # Run on a match video — pauses for interactive identification
 ./target/release/offload run --input match.mp4
+
+# ...or straight from YouTube (downloaded once, then cached; needs yt-dlp)
+./target/release/offload run --input "https://www.youtube.com/watch?v=VIDEO_ID"
 ```
 
 ---
@@ -62,13 +66,13 @@ ollama pull llava
 ## CLI Reference
 
 ```
-offload run     --input <video>  [--output <video>]
+offload run     --input <video|url>  [--output <video>]
                 [--config <path>] [--debug] [--dry-run] [--no-cache]
 
-offload inspect --input <video>  [--duration <secs>] [--output-dir <dir>]
+offload inspect --input <video|url>  [--duration <secs>] [--output-dir <dir>]
                 [--config <path>]                       # annotated frame dump
 
-offload cache   --clear  [--input <video>]              # wipe intermediate results
+offload cache   --clear  [--input <video|url>]            # wipe intermediate results
 
 offload models  [--download] [--list]                   # model management
 ```
@@ -104,7 +108,7 @@ See [SPEC.md](./SPEC.md) for functional requirements, pipeline behaviour, input/
 | Phase | Description | Status |
 |---|---|---|
 | 0 | Project skeleton & tooling | ✅ |
-| 1 | Video I/O (extraction & compilation) | ✅ |
+| 1 | Video I/O (extraction & compilation ✅; YouTube/URL input ⬜) | 🟡 |
 | 2 | Player detection (YOLOv8 + ONNX) | ⬜ |
 | 3 | Multi-object tracking (ByteTrack) | ⬜ |
 | 4 | Player re-identification (OSNet) + match segmentation for multi-match/tournament inputs | ⬜ |
@@ -117,7 +121,7 @@ See [SPEC.md](./SPEC.md) for functional requirements, pipeline behaviour, input/
 ## Project Principles
 
 - **No Python.** The entire stack is Rust. CV inference runs via ONNX Runtime (`ort` crate). Vision classification runs via local Ollama HTTP API.
-- **No cloud.** All processing is local. No accounts, no uploads, no API keys.
+- **No cloud.** All processing is local. No accounts, no uploads, no API keys. Where the source video *comes from* is up to you: a local file, or a YouTube link Offload downloads once and then processes offline.
 - **No club dependency.** Works with any single-camera match recording. You don't need your club to buy hardware.
 - **Resumable.** Intermediate results are cached. A crash or interrupted run doesn't mean starting over.
 - **Configurable, not magic.** Every threshold that affects output is exposed in `offload.toml`.

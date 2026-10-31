@@ -21,7 +21,7 @@ This document describes the technical architecture of Offload: the workspace lay
 
 ## 1. System Overview
 
-Offload is a sequential processing pipeline. A single match video enters; a compiled highlight reel exits. The pipeline has six distinct stages, each implemented as a separate Rust crate, orchestrated by a top-level binary crate.
+Offload is a sequential processing pipeline. A single match video enters, either as a local file or as a YouTube URL that `video-io` first downloads to the cache (Stage 0, SPEC.md §2); a compiled highlight reel exits. The pipeline has six distinct stages, each implemented as a separate Rust crate, orchestrated by a top-level binary crate.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -102,8 +102,9 @@ The brain of the system. Contains no domain logic itself — only orchestration.
 
 ### `video-io`
 
-All interaction with video files via `ffmpeg-next`.
+All interaction with video files via `ffmpeg-next`, plus resolving where the source video comes from.
 
+- `resolve_source(input: &str, config: &SourceConfig, cache_dir: &Path) -> Result<ResolvedSource>`: Stage 0. Passes a local path through unchanged. A URL is downloaded via a `yt-dlp` subprocess (`std::process::Command`, so no new crate dependency) into `<cache_dir>/sources/` and returns the downloaded path. A download already cached under the same video ID is reused without touching the network
 - `FrameExtractor`: opens a video, iterates decoded frames as `Frame` structs
 - `ClipWriter`: accepts a `Vec<ClipSpec>` (start/end timestamps + optional label), extracts segments, concatenates, transcodes to output
 - Handles frame rate normalisation and resolution scaling
@@ -174,7 +175,13 @@ Final output assembly via `ffmpeg-next`.
 
 ```
 INPUT
-  match.mp4 + offload.toml + [user interaction at Stage 4]
+  match.mp4 | YouTube URL + offload.toml + [user interaction at Stage 4]
+      │
+      ▼
+[video-io] Source resolution (Stage 0)
+  → Local path: passed through unchanged
+  → URL: yt-dlp download → cache/sources/<extractor>-<video_id>.mp4 + source.json
+  → ResolvedSource { path, origin }; everything below reads `path` only
       │
       ▼
 [video-io] Frame extraction
@@ -259,6 +266,22 @@ pub struct MatchSegment {
     pub start_ms: u64,
     pub end_ms: u64,
     pub label: Option<String>,
+}
+
+// video-io
+pub enum SourceOrigin {
+    LocalFile,
+    Url {
+        url: String,           // as the user passed it
+        extractor: String,     // e.g. "youtube"
+        video_id: String,      // download/cache key, stable across URL forms
+        title: Option<String>,
+    },
+}
+
+pub struct ResolvedSource {
+    pub path: PathBuf,         // local file every later stage reads
+    pub origin: SourceOrigin,
 }
 
 // video-io
@@ -385,6 +408,7 @@ Cache lives at `<output_dir>/.offload_cache/<input_video_hash>/`.
 
 | File | Contents | Invalidated when |
 |---|---|---|
+| `../sources/<extractor>-<video_id>.mp4` + `source.json` | Downloaded source video for a URL input (Stage 0) | Only by `offload cache --clear --input <URL>`; `--no-cache` doesn't re-download. Sits beside the per-video directories rather than inside one, because the content hash isn't known until the download finishes |
 | `detections.json` | `Vec<(frame_number, Vec<Detection>)>` | Input video or detection config changes |
 | `tracks.json` | `Vec<(frame_number, Vec<Track>)>` | Detections or tracker config changes |
 | `segments.json` | `Vec<MatchSegment>` | Detections or `segmentation` config changes |
@@ -437,6 +461,17 @@ A heuristic (e.g. "highlight = frame where subject bbox overlaps another player'
 
 This distinction is especially important for lowlights: a lowlight is not a prolonged period of inactivity (that would just be noise), but a discrete bad play event — a missed tackle, a knock-on, a high tackle that gives away a penalty. The Ollama classifier is the only component capable of making that call from raw video without structured event tagging. Ollama makes this feasible locally without a Python environment.
 
+### Why download URL sources with `yt-dlp` rather than a Rust crate, and why download first rather than stream?
+
+YouTube changes its player and signature scheme often enough that extractors break every few weeks. `yt-dlp` is updated almost daily to keep up. The pure-Rust YouTube crates lag behind and break for long stretches, which would leave Offload's URL input unreliable for reasons outside this project's control. Running `yt-dlp` as an external executable (like `ollama`) lets the user update it independently (`yt-dlp -U`). It adds no crate dependency, and anyone who only uses local files doesn't need it at all. This doesn't conflict with the "no Python" principle: that principle is about Offload's own stack. `yt-dlp` is an optional host tool that ships as a standalone binary.
+
+Downloading first, rather than handing FFmpeg a stream URL, is required by how the rest of the pipeline works:
+- The source is read more than once: frame extraction, the identification pause (which can sit idle for minutes waiting on the user), and clip assembly at the end.
+- YouTube serves video and audio as separate DASH streams, and its signed stream URLs expire after a few hours, which is less than an 80-minute match takes to process on CPU.
+- Stage caches are keyed by the source file's content hash.
+
+A local file makes all of these trivial, and later runs work fully offline.
+
 ### Why separate `reid` and `tracker` crates?
 
 Tracker = geometric identity (IoU-based bbox association). ReID = appearance identity (embedding similarity). They solve different subproblems and can be tuned independently. Keeping them separate also makes it straightforward to swap either implementation — e.g. upgrading to a newer ReID model — without touching the other.
@@ -483,3 +518,4 @@ External runtime dependencies (not Rust crates — must be installed on host):
   see CLAUDE.md's "Deliberately deferred dependencies" for why `ort`'s
   default bundling is disabled in this project)
 - `ollama` binary running locally on port 11434
+- `yt-dlp` (optional; only needed for URL inputs, run as a subprocess by `video-io`)

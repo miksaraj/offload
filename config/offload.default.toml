@@ -9,6 +9,14 @@ model    = "llava"               # or "moondream", or any installed vision model
 timeout_secs = 30
 required = false
 
+[source]
+# Only used when --input is a URL (YouTube). Local file inputs ignore this section.
+# Not wired up yet — lands in Phase 1c (see SPEC.md Stage 0).
+ytdlp_path = "yt-dlp"   # bare name = looked up on PATH
+max_height = 1080       # cap on downloaded video height (working res is 720p)
+# cookies_from_browser = "firefox"   # for private / members-only / age-restricted videos
+# download_dir = ".offload_cache/sources"   # defaults to <cache dir>/sources/
+
 [video]
 # FPS to sample for detection. Lower = faster, less temporal resolution.
 # At 25fps source, 8 = every 3rd frame.

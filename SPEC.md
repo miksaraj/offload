@@ -22,14 +22,14 @@ This document defines the functional requirements, pipeline behaviour, input/out
 
 ### Goals
 
-- Accept a single match video file as input
+- Accept a single match video as input, either as a **local file** or as a **YouTube URL** (see [§4 Source Video](#source-video)) — a URL is downloaded once to the local cache and from then on processed exactly like a local file
 - Detect all players in every sampled frame using a local ONNX model
 - Track all players across the full video with stable per-player IDs
 - Identify the subject player through an **interactive selection phase** in which the user clicks or selects themselves from an annotated candidate frame extracted from the footage — no external reference photo required
 - Confirm identification with the user before committing to a full-video tracking run
 - Score moments featuring the subject player for **highlight** (good plays) and **lowlight** (bad plays) significance using a local vision model
 - Assemble and export a final highlight/lowlight compilation video
-- Run entirely locally with no network dependency beyond Ollama (which is also local)
+- Run entirely locally with no network dependency beyond Ollama (which is also local) — the one exception is the optional, one-time **download** of a URL source before processing starts; no footage, frames, or results are ever sent anywhere
 - Resume gracefully from cached intermediate results after interruption
 - Support a configurable debug mode that produces annotated frame dumps at every pipeline stage
 - Support inputs that contain more than one discrete match (e.g. a 7s tournament livestream, or an XV/touch game where the subject is substituted on partway through) by segmenting the input — manually via config or via heuristic detection — so identification, moment grouping, and clip assembly are each scoped to the correct match
@@ -40,16 +40,40 @@ This document defines the functional requirements, pipeline behaviour, input/out
 - Real-time / live processing — batch processing of recorded footage only
 - Tactical team analysis — this tool is for individual personal highlights, not coaching analytics
 - Automatic camera operation or recording — input must be pre-recorded footage
-- Any form of cloud sync, account system, or remote storage
+- Any form of cloud sync, account system, or remote storage — fetching a source video *from* YouTube is in scope; uploading anything (including the output reel) *to* YouTube or any other service is not
+- Processing a stream that is still live — a finished livestream's VOD is fine, an in-progress broadcast is rejected (see Stage 0)
 - Support for multi-camera inputs in v1 — single static or panning camera only
 
 ---
 
 ## 2. Pipeline Specification
 
+### Stage 0 — Source Resolution
+
+**Input:** the `--input` value, `source` config  
+**Output:** a local video file path, plus source metadata
+
+Every later stage works on a local file. This stage turns whatever the user passed as `--input` into one.
+
+- **Classification:** an `--input` value that parses as an `http://` or `https://` URL is a **URL source**; anything else is a **local file source**. There is no `--url` flag and no prefix syntax — the same `--input` takes both.
+- **Local file source:** check that the path exists (otherwise "Input video not found", §7) and pass it through unchanged. No copy is made.
+- **URL source:** download the video to the cache with [`yt-dlp`](https://github.com/yt-dlp/yt-dlp), run as a subprocess (see ARCHITECTURE.md §9 for why), then continue with the downloaded file as if it had been given as a local path:
+  - YouTube is the supported, tested target. This includes `youtube.com/watch?v=…`, `youtu.be/…`, `youtube.com/live/…` (finished livestream VODs) and unlisted videos. Other sites `yt-dlp` supports may work but aren't tested or guaranteed.
+  - Playlist URLs are rejected. One run = one source video. A `watch?v=…&list=…` URL processes only the video it names, never the whole playlist (`--no-playlist`).
+  - Query parameters other than the video ID (e.g. `&t=95s`) are ignored. Restricting processing to part of a video is what `segmentation.segments` is for.
+  - **Format selection:** the best video stream with height ≤ `source.max_height` (default 1080) plus the best audio stream, merged into a single MP4. The pipeline works internally at 1280×720 (`video.working_*`), so fetching 4K would only cost bandwidth, disk and decode time. If no stream at or under the cap exists, take the smallest one available and log a WARN.
+  - **Location and reuse:** the file goes to `<cache dir>/sources/<extractor>-<video_id>.mp4` (e.g. `youtube-dQw4w9WgXcQ.mp4`), alongside a `source.json` sidecar recording the original URL, video ID, title, uploader, duration, the chosen format, the download time, and the file's SHA-256. It's keyed by **video ID**, not URL text, so `youtu.be/X` and `youtube.com/watch?v=X&t=10` resolve to the same download. If a complete download for that ID already exists, skip the download step entirely; a re-run then needs no network at all.
+  - `--no-cache` ignores and rebuilds the *stage* caches but doesn't re-download the source: a given video ID's download is deterministic and expensive to repeat. To force a fresh download, run `offload cache --clear --input <URL>`.
+  - **Interrupted downloads:** `yt-dlp` writes to a `.part` file and resumes it on the next run. A file only counts as complete once `yt-dlp` exits successfully and the sidecar is written.
+  - **Progress:** download progress is shown to the user as a progress line, in the same terminal style as the other stages.
+  - **Live content:** if the URL points to a stream that is currently live, or to a premiere/scheduled stream that hasn't aired yet, exit with a fatal error before downloading anything (Non-Goals: pre-recorded footage only).
+  - **Restricted videos:** private, members-only, or age-restricted videos need authentication. When `source.cookies_from_browser` is set (e.g. `"firefox"`), pass it through to `yt-dlp --cookies-from-browser`. Offload never asks for, stores, or handles YouTube credentials itself.
+- The downloaded file is the stage's output from here on. Stage caches (ARCHITECTURE.md §7) are keyed by its content hash, exactly as for a local file, and Stage 6 cuts clips from it. The URL itself is never read again during the run.
+- Offload doesn't check whether the user has the right to download or reuse a video. That's the user's responsibility, as with any local file. The intended use is personal reels from footage of your own matches (club or tournament uploads, a parent's channel, etc.).
+
 ### Stage 1 — Frame Extraction
 
-**Input:** video file path, extraction config  
+**Input:** video file path (from Stage 0), extraction config  
 **Output:** stream of `Frame` structs
 
 - Decode video using FFmpeg
@@ -261,10 +285,10 @@ Return ONLY a JSON object with no preamble:
 The primary command. Runs the full pipeline. Pauses for interactive subject identification before beginning full-video processing.
 
 ```
-offload run [OPTIONS] --input <FILE>
+offload run [OPTIONS] --input <FILE|URL>
 
 Options:
-  -i, --input <FILE>          Path to source match video
+  -i, --input <FILE|URL>      Source match video: a local path, or a YouTube URL (downloaded once to the cache — see Stage 0)
   -o, --output <FILE>         Output video path [default: highlights.mp4]
   -c, --config <FILE>         Config file path [default: offload.toml]
       --debug                 Write annotated frame dumps to ./debug/
@@ -276,13 +300,13 @@ Options:
 
 ### `offload inspect`
 
-Debug utility: runs detection and tracking on the first N seconds of a video and dumps annotated frames, without running ReID or classification. Useful for verifying detection quality before a full run.
+Debug utility: runs detection and tracking on the first N seconds of a video (for a URL input, the full video is downloaded first so a later `run` can reuse it) and dumps annotated frames, without running ReID or classification. Useful for verifying detection quality before a full run.
 
 ```
-offload inspect [OPTIONS] --input <FILE>
+offload inspect [OPTIONS] --input <FILE|URL>
 
 Options:
-  -i, --input <FILE>          Path to source match video
+  -i, --input <FILE|URL>      Source match video: a local path, or a YouTube URL (downloaded once to the cache — see Stage 0)
   -d, --duration <SECS>       Seconds to inspect [default: 30]
   -o, --output-dir <DIR>      Directory for annotated frames [default: ./inspect/]
   -c, --config <FILE>         Config file path [default: offload.toml]
@@ -294,11 +318,11 @@ Options:
 Cache management.
 
 ```
-offload cache --clear [--input <FILE>]
+offload cache --clear [--input <FILE|URL>]
 
 Options:
       --clear                 Clear cache (all inputs, or just --input if specified)
-  -i, --input <FILE>          Scope cache operation to this input file only
+  -i, --input <FILE|URL>      Scope cache operation to this input only; for a URL this also deletes the downloaded source video
 ```
 
 ### `offload models`
@@ -316,9 +340,18 @@ offload models --list         List currently installed models and their paths
 
 ### Source Video
 
+The source video can come from either of two places. Both go through the same `--input` flag:
+
+| Source | Example `--input` | Requirements |
+|---|---|---|
+| Local file | `match.mp4`, `~/Videos/2026-10-18-vs-harlequins.mkv` | The file exists and is readable |
+| YouTube URL | `https://www.youtube.com/watch?v=…`, `https://youtu.be/…`, `https://www.youtube.com/live/…` | `yt-dlp` on `PATH` (or at `source.ytdlp_path`); network access for the first run only; the video is public or unlisted, or `source.cookies_from_browser` is set; it isn't currently live |
+
+A YouTube source is downloaded once (Stage 0) and then has to meet the same requirements as a local file:
+
 | Property | Requirement |
 |---|---|
-| Format | Any format decodable by FFmpeg (MP4, MKV, MOV, AVI, etc.) |
+| Format | Any format decodable by FFmpeg (MP4, MKV, MOV, AVI, etc.) — URL sources are always merged to MP4 |
 | Resolution | Minimum 720p recommended for reliable detection |
 | Frame rate | Any; internally normalised |
 | Duration | Any; typical use case is 80-minute match |
@@ -404,6 +437,19 @@ reid     = "models/osnet_x1_0.onnx"
 endpoint = "http://localhost:11434"
 model    = "llava"               # or "moondream", or any installed vision model
 timeout_secs = 30
+
+[source]
+# Only used when --input is a URL (Stage 0). Local file inputs ignore this section.
+# yt-dlp executable. Bare name = looked up on PATH.
+ytdlp_path         = "yt-dlp"
+# Cap on the downloaded video height. Internal working resolution is 720p,
+# so >1080 only costs bandwidth/disk/decode time.
+max_height         = 1080
+# Pass through to `yt-dlp --cookies-from-browser` for private / members-only /
+# age-restricted videos, e.g. "firefox", "chrome", "safari". Unset = anonymous.
+# cookies_from_browser = "firefox"
+# Where downloads go. Defaults to <cache dir>/sources/
+# download_dir = ".offload_cache/sources"
 
 [video]
 # FPS to sample for detection. Lower = faster, less temporal resolution.
@@ -498,6 +544,12 @@ All errors are reported via `tracing` at the appropriate level. The CLI exits wi
 | Condition | Behaviour |
 |---|---|
 | Input video not found | Fatal error, exit 1 |
+| URL input but `yt-dlp` not found | Fatal error with install hint (`brew install yt-dlp` / `pipx install yt-dlp` / standalone binary from the yt-dlp GitHub releases) and a pointer to `source.ytdlp_path` |
+| URL is a playlist-only link, or not supported by `yt-dlp` | Fatal error, exit 1 — states that one source video is processed per run |
+| Video unavailable, private, members-only, or age-restricted (no usable cookies) | Fatal error with `yt-dlp`'s stderr captured in the log; hints at `source.cookies_from_browser` for the auth cases |
+| URL points to a currently live stream or an unaired premiere | Fatal error before any download; says to re-run once the stream has finished |
+| Network failure or interruption during download | Fatal error, exit 1; the partial `.part` file is kept and the next run resumes it |
+| No stream at or under `source.max_height` | Warning; downloads the smallest available stream instead |
 | ONNX model file not found | Fatal error with hint to run `offload models --download` |
 | No players detected in candidate frames | Fatal error; suggests checking video quality and detector confidence threshold |
 | User enters invalid bounding box number | Re-prompt until valid input or Ctrl-C |
@@ -524,6 +576,7 @@ The following phases define the implementation roadmap. Each phase is designed t
 | 0 | Project Skeleton | Cargo workspace, CLI parses, CI green, `justfile` tasks |
 | 1a | Frame Extraction | `FrameExtractor` iterates frames, PNG dump test passes |
 | 1b | Clip Assembly | `ClipWriter` produces correct clips from known timestamps |
+| 1c | URL Sources (YouTube) | Stage 0: `--input <YouTube URL>` downloads via `yt-dlp` to `<cache>/sources/` with a `source.json` sidecar; a second run with the same video ID (different URL form) reuses the download without network; playlist/live/missing-`yt-dlp` errors behave as in §7. Nothing later in the pipeline depends on it, so it can land at any point before Phase 6 |
 | 2a | Detection: Inference | Single-frame ONNX inference runs, raw tensor logged |
 | 2b | Detection: Postprocessing | NMS and class filtering correct, annotated debug frames pass visual check |
 | 3a | Tracking: Kalman Filter | Unit tests pass on synthetic track data |
@@ -546,6 +599,7 @@ The following phases define the implementation roadmap. Each phase is designed t
 The v1.0 release is considered complete when all of the following hold:
 
 - [ ] `offload run --input match.mp4` completes without errors on a full 80-minute match video
+- [ ] `offload run --input <YouTube URL>` of the same match produces equivalent output to running on a local copy, and a second run with the same URL makes no network requests other than to Ollama
 - [ ] The interactive identification phase correctly opens an annotated candidate frame and accepts user selection
 - [ ] The confirmation frame clearly shows the identified subject and correctly re-runs identification on rejection
 - [ ] The subject player is correctly identified for ≥ 80% of the frames in which they are visibly present (verified by manual spot-check of debug frames)
@@ -556,6 +610,6 @@ The v1.0 release is considered complete when all of the following hold:
 - [ ] `--dry-run` output matches the actual compiled moments
 - [ ] All configuration options documented in this spec are functional
 - [ ] The tool compiles and runs on macOS (Apple Silicon) and Linux (x86_64) from a clean checkout using only `cargo build --release` plus the listed system dependencies
-- [ ] No network requests are made at runtime except to the local Ollama instance
+- [ ] No network requests are made at runtime except to the local Ollama instance and, for a URL input whose download isn't already cached, `yt-dlp`'s fetch of that one video
 - [ ] On a tournament-style input with multiple matches in one file, manual `segmentation.segments` produce correctly scoped output: no clip bridges two different matches, and identification correctly targets a segment other than the first when configured to
 - [ ] On the same input, heuristic auto-detection (`segmentation.enabled = true`) proposes a segment list that a human would agree matches the actual match boundaries, and the confirm/edit prompt allows correcting it

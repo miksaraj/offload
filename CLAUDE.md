@@ -123,6 +123,16 @@ synthetic non-square frame and asserts the YOLOv8n output shape
 error. `detector` isn't wired into `pipeline-core`/the `offload` CLI
 yet — that's Phase 2b once postprocessing exists.
 
+Phase 1c (URL / YouTube source input) is **specced, not implemented**:
+SPEC.md §2 "Stage 0 — Source Resolution" (`--input` takes a path or
+an http(s) URL; URLs are downloaded once via a `yt-dlp` subprocess to
+`<cache>/sources/<extractor>-<video_id>.mp4` + `source.json`, then
+treated as a local file). ARCHITECTURE.md §9 covers why it uses yt-dlp
+and downloads first instead of streaming. `[source]` is in
+`config/offload.default.toml` but nothing reads it yet. Nothing
+downstream depends on 1c, so it can be done whenever convenient, e.g.
+before Phase 2b or alongside Phase 6.
+
 ## Deliberately deferred dependencies
 
 `ffmpeg-next` landed in `video-io`'s `Cargo.toml` in Phase 1a (see
