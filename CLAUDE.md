@@ -142,8 +142,34 @@ Testing: `models/download.sh` also fetches `models/samples/bus.jpg`
 `crates/detector/tests/run_inference.rs` asserts YOLOv8n finds exactly
 the reference 4 people in it, and that a blank frame produces none.
 `detector`'s unit tests cover decode, NMS, IoU and letterbox mapping on
-hand-built tensors. Detection on real rugby footage hasn't been checked
-yet; use `offload inspect` on the user's clip.
+hand-built tensors.
+
+**Real-footage check (user's ~25 s club rugby clip).** This is the same
+clip as in Phase 1a: 706x848 portrait, with the actual picture in a band
+from rows 265 to 583 and black bars above and below. `offload inspect`
+over the whole clip: clearly visible players and the referee get tight,
+confident boxes, with no false positives seen. Distant packs and the
+edges of rucks are under-detected (frame 0: 2 boxes for about 20
+players). Mean person boxes per frame, measured at 1 fps over the clip:
+
+| | threshold 0.40 (current default) | threshold 0.25 |
+|---|---|---|
+| full frame | 7.6 | 9.6 |
+| black bars cropped | 8.2 | 10.3 |
+
+On the 3 s wide shot it went from 4 boxes to 16, and every one of the
+16 at crop + 0.25 was checked by eye as a real person. Two follow-ups
+for Phase 3 (deliberately not changed in 2b, since both depart from
+SPEC):
+1. **ByteTrack needs the low-confidence boxes that the detector
+   currently throws away.** `tracker.low_confidence_threshold = 0.1`
+   is meaningless while the detector drops everything below
+   `detector.confidence_threshold = 0.4`. Have the detector emit down
+   to the tracker's low threshold, and apply 0.4 only where a "sure"
+   detection is needed (identification candidates, debug frames).
+2. **Auto-crop letterbox/pillarbox black bars** before detection, as
+   part of Stage 1 frame normalisation (which isn't implemented yet),
+   mapping boxes back by the crop offset. It helps most on wide shots.
 
 Phase 1c (URL / YouTube source input) is complete: SPEC.md Stage 0,
 in `crates/video-io/src/source.rs`. `resolve_source(input, &SourceConfig,
