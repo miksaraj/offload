@@ -22,6 +22,8 @@ pub enum PipelineError {
     Stage(String),
     #[error(transparent)]
     Detector(#[from] detector::DetectorError),
+    #[error(transparent)]
+    ReId(#[from] reid::ReIdError),
     #[error("writing {0}: {1}")]
     Output(PathBuf, String),
     #[error(transparent)]
@@ -151,6 +153,40 @@ impl From<&TrackerSection> for tracker::TrackerConfig {
     }
 }
 
+/// `[reid]` section (SPEC.md Stage 4).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ReIdSection {
+    pub candidate_frame_count: u32,
+    pub candidate_window_secs: u32,
+    pub candidate_window_start_secs: Option<u32>,
+    pub confirmation_scan_secs: u32,
+    pub max_identification_attempts: u32,
+    pub lock_threshold: f32,
+    pub vote_window: u32,
+    pub reentry_threshold: f32,
+    pub reentry_vote_window: u32,
+    pub max_identification_frame: u64,
+}
+
+impl Default for ReIdSection {
+    fn default() -> Self {
+        let d = reid::ReIdConfig::default();
+        Self {
+            candidate_frame_count: d.candidate_frame_count,
+            candidate_window_secs: d.candidate_window_secs,
+            candidate_window_start_secs: d.candidate_window_start_secs,
+            confirmation_scan_secs: d.confirmation_scan_secs,
+            max_identification_attempts: d.max_identification_attempts,
+            lock_threshold: d.lock_threshold,
+            vote_window: d.vote_window,
+            reentry_threshold: d.reentry_threshold,
+            reentry_vote_window: d.reentry_vote_window,
+            max_identification_frame: d.max_identification_frame,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct CacheConfig {
@@ -177,6 +213,7 @@ pub struct Config {
     pub video: VideoConfig,
     pub detector: DetectorSection,
     pub tracker: TrackerSection,
+    pub reid: ReIdSection,
     pub cache: CacheConfig,
 }
 
@@ -235,7 +272,81 @@ impl Pipeline {
     pub fn run(&self, input: &str, _output: &Path) -> Result<()> {
         let source = self.resolve_source(input)?;
         tracing::info!(path = %source.path.display(), origin = ?source.origin, "source resolved");
-        Err(PipelineError::Stage("not yet implemented".into()))
+
+        let stdin = std::io::stdin();
+        let mut stdout = std::io::stdout();
+        let selection = self.identify(
+            &source.path,
+            &reid::InteractionOptions::default(),
+            &mut stdin.lock(),
+            &mut stdout,
+        )?;
+        println!(
+            "\nSelected the player at {:?} in the frame at {}{}.",
+            selection.bbox,
+            reid::identify::format_ms(selection.frame.timestamp_ms),
+            selection
+                .descriptor
+                .as_deref()
+                .map(|d| format!(" (\"{d}\")"))
+                .unwrap_or_default()
+        );
+        Err(PipelineError::Stage(
+            "subject identified; confirmation and tracking (Phase 4c) not yet implemented".into(),
+        ))
+    }
+
+    /// Stage 4A: pull `reid.candidate_frame_count` frames spread across the
+    /// identification window, detect players in each, and let the user
+    /// pick themselves (see [`reid::identify`]). `input`/`out` are the
+    /// terminal (stdin/stdout from `run`; scripted in tests).
+    pub fn identify(
+        &self,
+        source_path: &Path,
+        options: &reid::InteractionOptions,
+        input: &mut impl std::io::BufRead,
+        out: &mut impl std::io::Write,
+    ) -> Result<reid::Selection> {
+        let cfg = &self.config.reid;
+        let mut detector =
+            detector::Detector::new(&self.config.models.detector, (&self.config.detector).into())?;
+        let mut model = reid::ReIdModel::new(&self.config.models.reid)?;
+
+        let frames = video_io::FrameExtractor::new(source_path)?;
+        let start_ms = u64::from(cfg.candidate_window_start_secs.unwrap_or(0)) * 1000;
+        let targets = reid::identify::candidate_timestamps(
+            start_ms,
+            u64::from(cfg.candidate_window_secs) * 1000,
+            frames.duration_ms(),
+            cfg.candidate_frame_count,
+        );
+        let mut candidates = Vec::new();
+        let mut next = targets.iter().peekable();
+        for frame in frames {
+            let Some(&&target) = next.peek() else {
+                break;
+            };
+            if frame.timestamp_ms < target {
+                continue;
+            }
+            while next.peek().is_some_and(|&&t| t <= frame.timestamp_ms) {
+                next.next();
+            }
+            let detections = detector.detect(&frame)?;
+            tracing::info!(
+                timestamp_ms = frame.timestamp_ms,
+                players = detections.len(),
+                "identification candidate frame"
+            );
+            candidates.push(reid::Candidate { frame, detections });
+        }
+        Ok(reid::identify::identify_interactively(
+            &candidates,
+            &mut model,
+            options,
+            input,
+            out,
+        )?)
     }
 
     /// `offload inspect`: resolve the source, then run detection and

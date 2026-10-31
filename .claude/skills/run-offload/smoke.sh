@@ -61,6 +61,7 @@ INSPECT_DIR="$(mktemp -d)"
 check    "inspect on fixture exits 0"      0            "$BIN" inspect --input crates/video-io/tests/fixtures/testsrc.mp4 --duration 1 --output-dir "$INSPECT_DIR"
 contains "inspect on fixture writes annotated frames" "frame_000000_00000000ms.jpg" ls "$INSPECT_DIR"
 rm -rf "$INSPECT_DIR"
+contains "run on a video with no people reports it" "no players detected" "$BIN" run --input crates/video-io/tests/fixtures/testsrc.mp4 --config /dev/null
 check    "cache --clear exits 0 (stub)"    0            "$BIN" cache --clear
 check    "models --download exits 0 (stub)" 0           "$BIN" models --download
 check    "run with no --input fails to parse" 2          "$BIN" run
