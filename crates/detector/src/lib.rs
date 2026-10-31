@@ -76,7 +76,11 @@ pub struct DetectorConfig {
 impl Default for DetectorConfig {
     fn default() -> Self {
         Self {
-            confidence_threshold: 0.4,
+            // 0.25 (ultralytics' own default), not the originally specced
+            // 0.4: on real club footage 0.4 missed ~20% of visible players
+            // (distant packs, ruck edges) with no false positives gained
+            // back — see CLAUDE.md's Phase 2b real-footage check.
+            confidence_threshold: 0.25,
             nms_iou_threshold: 0.45,
         }
     }
@@ -484,7 +488,7 @@ mod tests {
         let raw = tensor(&[
             (320.0, 320.0, 40.0, 80.0, 0, 0.90), // person, kept
             (322.0, 321.0, 40.0, 80.0, 0, 0.80), // duplicate of the above, NMS'd
-            (100.0, 320.0, 40.0, 80.0, 0, 0.30), // person below threshold
+            (100.0, 320.0, 40.0, 80.0, 0, 0.20), // person below threshold
             (500.0, 320.0, 40.0, 80.0, 5, 0.95), // bus, not a person
             (500.0, 400.0, 20.0, 40.0, 0, 0.50), // second person, kept
         ]);

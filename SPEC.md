@@ -89,7 +89,7 @@ Every later stage works on a local file. This stage turns whatever the user pass
 
 - Run YOLOv8 ONNX inference on each frame
 - Preprocessing: resize to 640×640 with letterbox padding, normalise pixel values to `[0.0, 1.0]`, convert `HWC u8` to `NCHW f32`
-- Postprocessing: decode `[1, 84, 8400]` output tensor; each anchor takes its highest-scoring class (YOLOv8 has no separate objectness score) and is kept only if that class is 0 (person) and the score meets the confidence threshold (default: 0.4); apply greedy NMS (IoU threshold default: 0.45, at most 300 boxes per frame)
+- Postprocessing: decode `[1, 84, 8400]` output tensor; each anchor takes its highest-scoring class (YOLOv8 has no separate objectness score) and is kept only if that class is 0 (person) and the score meets the confidence threshold (default: 0.25, lowered from an initial 0.4 that missed about 20% of visible players on real club footage); apply greedy NMS (IoU threshold default: 0.45, at most 300 boxes per frame)
 - Scale bounding boxes back to original frame pixel coordinates after NMS
 - Frames with zero detections are recorded as empty; they do not halt the pipeline
 
@@ -461,7 +461,7 @@ working_height = 720
 
 [detector]
 # YOLOv8 inference settings
-confidence_threshold = 0.4
+confidence_threshold = 0.25
 nms_iou_threshold    = 0.45
 # Execution provider: "cpu", "cuda", "coreml"
 execution_provider   = "cpu"

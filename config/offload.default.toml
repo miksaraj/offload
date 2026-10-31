@@ -27,7 +27,7 @@ working_height = 720
 
 [detector]
 # YOLOv8 inference settings
-confidence_threshold = 0.4
+confidence_threshold = 0.25   # lowered from 0.4 after real-footage testing
 nms_iou_threshold    = 0.45
 # Execution provider: "cpu", "cuda", "coreml" (not read yet — always CPU)
 execution_provider   = "cpu"
