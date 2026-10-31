@@ -294,16 +294,33 @@ the new `[reid]` keys are in SPEC §6.
   covers the retry loop giving up after `max_identification_attempts`.
   Together they take about 80 s in a debug build.
 
-**Real clip, picking a green-kit player (#9 at 4.1 s):** the seed track
-is followed through a camera pan, 3.6–7.9 s (backward chaining picked
-up the track's life before the pick), until he leaves the shot. All 3
-later re-entry candidates were refused: the best scored 0.70 against a
-teammate baseline of 0.72. Judged by eye with ID-labelled debug frames,
-the best candidate (near the posts at 11.8 s) is most likely a
-teammate, since the camera kept panning away from where he left. That's
-consistent with "missing beats wrong". Coverage was 18%, because the
-camera follows the ball rather than him. Ground truth for this clip is
-unknown, so this is a sanity check, not a measurement.
+**Real clip, picking a green-kit player (#9 at 4.1 s): the subject
+was handed to the wrong player by a tracker ID switch.** During a
+camera pan between 4.1 s and 7.8 s the tracker swapped IDs 33 and 42:
+the picked player is 33 at 4.1 s but 42 by 7.8 s, and vice versa. The
+"subject" followed after the pan was therefore someone else. The user
+spotted this; my first reading of the debug frames claimed 33 had been
+followed correctly, which was wrong. Read ID-labelled frames *across*
+frames, player by player, not one frame at a time. After that, all 3
+re-entry candidates were refused (best 0.70 vs a teammate baseline of
+0.72), and coverage was 18%.
+
+**Known limitation, deferred (user's call): tracker ID switches move
+the identity silently.** With the tracker leading identity, a swap
+inside a track's life never reaches the appearance check, because
+there's no gap. The user's clip is very low quality (706 px wide,
+heavily compressed, fast pans), so tuning is deferred until real
+footage can be run locally; revisit then. Options to evaluate:
+1. **Within-track appearance consistency:** if a subject track's later
+   signatures drift from the gallery (and especially if they match
+   better than a co-visible track's do), split the track there and
+   treat the rest as a re-entry decision.
+2. **Camera-motion compensation** in the tracker (BoT-SORT-style
+   global motion estimate applied to Kalman predictions). Pans are
+   exactly where IoU association swaps neighbours.
+3. Raising `video.detection_fps` during fast motion, or overall.
+Measure on real footage with ground truth (a hand-labelled subject
+over a few minutes) before choosing.
 
 **Real-footage ReID measurement (user's 25 s clip, tracked players
 ≥ 40 px tall, 8 fps): appearance alone barely separates same-kit

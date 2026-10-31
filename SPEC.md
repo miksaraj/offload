@@ -205,6 +205,8 @@ After confirmation, Stages 2–3 run over the whole video, collecting track appe
 
 #### Failure Mode
 
+- **Known limitation:** a tracker ID switch *within* a subject track's life (two neighbouring players' IDs swapping, seen during a fast camera pan on low-quality footage) hands the identity to the other player without any appearance check, because there's no gap to trigger one. To be revisited with real footage; see ARCHITECTURE §9
+
 - The seed can't fail (the pick itself seeds a track), but the user can reject the confirmation frame; see 4B step 5
 - After the full-video pass, print the subject's coverage (share of sampled frames where the subject is present, and the number of re-entries accepted). If coverage is below 10%, warn: the classifier stage will have little to work with
 
