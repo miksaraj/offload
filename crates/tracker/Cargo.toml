@@ -8,3 +8,8 @@ license.workspace = true
 detector.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+nalgebra.workspace = true
+image.workspace = true
+
+[dev-dependencies]
+video-io.workspace = true

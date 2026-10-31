@@ -121,6 +121,36 @@ impl From<&DetectorSection> for detector::DetectorConfig {
     }
 }
 
+/// `[tracker]` section (SPEC.md Stage 3).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct TrackerSection {
+    pub high_confidence_threshold: f32,
+    pub low_confidence_threshold: f32,
+    pub max_lost_frames: u32,
+}
+
+impl Default for TrackerSection {
+    fn default() -> Self {
+        let d = tracker::TrackerConfig::default();
+        Self {
+            high_confidence_threshold: d.high_confidence_threshold,
+            low_confidence_threshold: d.low_confidence_threshold,
+            max_lost_frames: d.max_lost_frames,
+        }
+    }
+}
+
+impl From<&TrackerSection> for tracker::TrackerConfig {
+    fn from(s: &TrackerSection) -> Self {
+        Self {
+            high_confidence_threshold: s.high_confidence_threshold,
+            low_confidence_threshold: s.low_confidence_threshold,
+            max_lost_frames: s.max_lost_frames,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct CacheConfig {
@@ -146,15 +176,39 @@ pub struct Config {
     pub source: SourceConfig,
     pub video: VideoConfig,
     pub detector: DetectorSection,
+    pub tracker: TrackerSection,
     pub cache: CacheConfig,
+}
+
+impl Config {
+    /// Detector settings for feeding the tracker. ByteTrack's second
+    /// association needs the low-confidence boxes, so the detector must
+    /// emit everything down to `tracker.low_confidence_threshold`, not just
+    /// the "sure" boxes at `detector.confidence_threshold`.
+    pub fn detector_config_for_tracking(&self) -> detector::DetectorConfig {
+        detector::DetectorConfig {
+            confidence_threshold: self
+                .detector
+                .confidence_threshold
+                .min(self.tracker.low_confidence_threshold),
+            nms_iou_threshold: self.detector.nms_iou_threshold,
+        }
+    }
 }
 
 /// What `offload inspect` processed.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct InspectSummary {
     pub frames_processed: usize,
+    /// Detections at or above `detector.confidence_threshold` (the
+    /// lower-confidence boxes passed to the tracker aren't counted).
     pub total_detections: usize,
     pub frames_without_detections: usize,
+    /// Sum over frames of tracks in the `Tracked` state.
+    pub total_tracked: usize,
+    /// Distinct track IDs seen. Far above the number of people on screen
+    /// means IDs are being dropped and re-created.
+    pub unique_track_ids: usize,
     pub output_dir: PathBuf,
 }
 
@@ -184,10 +238,10 @@ impl Pipeline {
         Err(PipelineError::Stage("not yet implemented".into()))
     }
 
-    /// `offload inspect`: resolve the source, then run detection on the
-    /// first `duration_secs` of it, sampled at `video.detection_fps`,
-    /// writing one annotated JPEG per sampled frame to `output_dir`.
-    /// Tracking joins this in Phase 3.
+    /// `offload inspect`: resolve the source, then run detection and
+    /// tracking on the first `duration_secs` of it, sampled at
+    /// `video.detection_fps`, writing one annotated JPEG per sampled frame
+    /// (track boxes coloured and labelled by ID) to `output_dir`.
     pub fn inspect(
         &self,
         input: &str,
@@ -195,8 +249,12 @@ impl Pipeline {
         output_dir: &Path,
     ) -> Result<InspectSummary> {
         let source = self.resolve_source(input)?;
-        let mut detector =
-            detector::Detector::new(&self.config.models.detector, (&self.config.detector).into())?;
+        let mut detector = detector::Detector::new(
+            &self.config.models.detector,
+            self.config.detector_config_for_tracking(),
+        )?;
+        let mut tracker = tracker::Tracker::new((&self.config.tracker).into());
+        let mut seen_ids = std::collections::HashSet::new();
         std::fs::create_dir_all(output_dir)
             .map_err(|e| PipelineError::Output(output_dir.to_path_buf(), e.to_string()))?;
 
@@ -220,26 +278,42 @@ impl Pipeline {
             }
 
             let detections = detector.detect(&frame)?;
+            let sure = detections
+                .iter()
+                .filter(|d| d.confidence >= self.config.detector.confidence_threshold)
+                .count();
+            let tracks = tracker
+                .update(detections)
+                .map_err(|e| PipelineError::Stage(e.to_string()))?;
+            let tracked = tracks
+                .iter()
+                .filter(|t| t.state == tracker::TrackState::Tracked)
+                .count();
             tracing::debug!(
                 frame = frame.frame_number,
                 timestamp_ms = frame.timestamp_ms,
-                detections = detections.len(),
+                detections = sure,
+                tracked,
                 "inspected frame"
             );
             let path = output_dir.join(format!(
                 "frame_{:06}_{:08}ms.jpg",
                 frame.frame_number, frame.timestamp_ms
             ));
-            detector::draw_detections(&frame, &detections)
-                .save(&path)
+            let mut img = detector::draw_detections(&frame, &[]);
+            tracker::draw_tracks(&mut img, &tracks);
+            img.save(&path)
                 .map_err(|e| PipelineError::Output(path.clone(), e.to_string()))?;
 
             summary.frames_processed += 1;
-            summary.total_detections += detections.len();
-            if detections.is_empty() {
+            summary.total_detections += sure;
+            if sure == 0 {
                 summary.frames_without_detections += 1;
             }
+            summary.total_tracked += tracked;
+            seen_ids.extend(tracks.iter().map(|t| t.track_id));
         }
+        summary.unique_track_ids = seen_ids.len();
         Ok(summary)
     }
 

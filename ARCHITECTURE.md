@@ -120,16 +120,19 @@ Runs YOLOv8 inference via `ort` (ONNX Runtime Rust bindings).
 - Preprocessing: resize to 640×640, normalise `[0, 255] → [0.0, 1.0]`, `HWC → NCHW` layout
 - Output decoding: parses `[1, 84, 8400]` tensor, extracts `xywh` boxes + confidence + class scores
 - `LetterboxTransform`: records the letterbox scale and padding so boxes map back to source-frame pixels after NMS
-- `draw_detections(frame, detections) -> RgbImage`: annotated debug frame (used by `offload inspect` and, later, `--debug`)
+- `draw_detections(frame, detections) -> RgbImage`: annotated debug frame (used by `--debug`)
+- `draw_rect`, `draw_label`: outline and bitmap-digit label primitives (a built-in 3×5 font, no font crate), shared with `tracker::draw_tracks` and Phase 4b's numbered boxes
 
 ### `tracker`
 
 ByteTrack multi-object tracking, implemented in pure Rust.
 
 - `Tracker::new(config)`: initialises with configured thresholds
-- `Tracker::update(detections: Vec<Detection>) -> Vec<Track>`: runs one frame of tracking, returns all active tracks with stable IDs
-- Internally: Kalman filter for motion prediction, IoU-based two-stage Hungarian assignment, track lifecycle management (Tracked / Lost / Removed states)
-- Each `Track` carries its history of bounding boxes for ReID sampling
+- `Tracker::update(detections: Vec<Detection>) -> Vec<Track>`: runs one sampled frame of tracking, returns confirmed `Tracked` and `Lost` tracks with stable IDs
+- Internally: `kalman` (constant-velocity filter over `cx, cy, aspect, height`, via `nalgebra`), `assignment` (exact Hungarian with an in-optimisation cost limit), two-stage IoU association, unconfirmed → confirmed → lost → removed lifecycle
+- The pipeline builds the detector with `Config::detector_config_for_tracking()` so it emits boxes down to `tracker.low_confidence_threshold`; the second association depends on them
+- `draw_tracks(img, tracks)`: debug drawing, one stable colour per ID plus an ID label
+- `Track` is a per-frame snapshot; it carries no bbox history. Later stages that need a track's history (ReID sampling) keep the per-frame track lists
 
 ### `reid`
 
@@ -315,8 +318,9 @@ pub struct Track {
     pub track_id: u64,
     pub bbox: Rect,
     pub state: TrackState,
-    pub age: u32,
-    pub frames_since_update: u32,
+    pub age: u32,                  // frames since creation
+    pub frames_since_update: u32,  // 0 when matched this frame
+    pub confidence: f32,           // score of the last matched detection
 }
 
 pub enum TrackState {
@@ -496,7 +500,8 @@ offload (binary)
     │   ├── ort (ONNX Runtime)
     │   └── ndarray
     ├── tracker
-    │   └── (pure Rust — no external ML deps)
+    │   ├── nalgebra (Kalman filter matrices)
+    │   └── image (debug drawing)
     ├── reid
     │   ├── ort
     │   ├── ndarray
