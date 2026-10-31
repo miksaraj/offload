@@ -11,7 +11,7 @@ required = false
 
 [source]
 # Only used when --input is a URL (YouTube). Local file inputs ignore this section.
-# Not wired up yet — lands in Phase 1c (see SPEC.md Stage 0).
+# See SPEC.md Stage 0.
 ytdlp_path = "yt-dlp"   # bare name = looked up on PATH
 max_height = 1080       # cap on downloaded video height (working res is 720p)
 # cookies_from_browser = "firefox"   # for private / members-only / age-restricted videos

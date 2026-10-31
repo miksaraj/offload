@@ -17,9 +17,9 @@ pub struct Cli {
 pub enum Command {
     /// Run the full pipeline on a match video.
     Run {
-        /// Path to source match video.
-        #[arg(short, long)]
-        input: PathBuf,
+        /// Source match video: a local path, or a YouTube URL (downloaded once to the cache).
+        #[arg(short, long, value_name = "FILE|URL")]
+        input: String,
 
         /// Output video path.
         #[arg(short, long, default_value = "highlights.mp4")]
@@ -44,9 +44,9 @@ pub enum Command {
 
     /// Run detection and tracking on the first N seconds of a video, without ReID or classification.
     Inspect {
-        /// Path to source match video.
-        #[arg(short, long)]
-        input: PathBuf,
+        /// Source match video: a local path, or a YouTube URL.
+        #[arg(short, long, value_name = "FILE|URL")]
+        input: String,
 
         /// Seconds to inspect.
         #[arg(short, long, default_value_t = 30)]
@@ -67,9 +67,9 @@ pub enum Command {
         #[arg(long)]
         clear: bool,
 
-        /// Scope cache operation to this input file only.
-        #[arg(short, long)]
-        input: Option<PathBuf>,
+        /// Scope cache operation to this input only; for a URL this also deletes the downloaded video.
+        #[arg(short, long, value_name = "FILE|URL")]
+        input: Option<String>,
     },
 
     /// Model management.

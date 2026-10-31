@@ -123,15 +123,31 @@ synthetic non-square frame and asserts the YOLOv8n output shape
 error. `detector` isn't wired into `pipeline-core`/the `offload` CLI
 yet — that's Phase 2b once postprocessing exists.
 
-Phase 1c (URL / YouTube source input) is **specced, not implemented**:
-SPEC.md §2 "Stage 0 — Source Resolution" (`--input` takes a path or
-an http(s) URL; URLs are downloaded once via a `yt-dlp` subprocess to
-`<cache>/sources/<extractor>-<video_id>.mp4` + `source.json`, then
-treated as a local file). ARCHITECTURE.md §9 covers why it uses yt-dlp
-and downloads first instead of streaming. `[source]` is in
-`config/offload.default.toml` but nothing reads it yet. Nothing
-downstream depends on 1c, so it can be done whenever convenient, e.g.
-before Phase 2b or alongside Phase 6.
+Phase 1c (URL / YouTube source input) is complete: SPEC.md Stage 0,
+in `crates/video-io/src/source.rs`. `resolve_source(input, &SourceConfig,
+cache_root)` passes local paths through unchanged (missing path →
+`VideoIoError::NotFound`, which `pipeline-core` maps to
+`InputNotFound`). It downloads an `http(s)` input by running the
+`yt-dlp` executable (`std::process::Command`, no crate) in three steps:
+`--version` to check it exists, `--dump-single-json` to get metadata and
+reject playlists and live/upcoming streams, then the download (merged
+to MP4). The download goes to
+`<cache>/sources/<extractor>-<video_id>.mp4`, and a
+`<extractor>-<video_id>.source.json` sidecar is written last; its
+existence is what marks a download as complete. YouTube IDs are parsed
+from the URL offline (`youtube_video_id`), so a cache hit never runs
+`yt-dlp`. `remove_cached_source` backs `offload cache --clear --input
+<URL>`; the rest of `cache` is still a stub. `SourceConfig` derives
+`Deserialize` in `video-io` and is embedded directly as
+`pipeline_core::Config::source`. `--input` is now a `String` (not
+`PathBuf`) on `run`/`inspect`/`cache`. `Pipeline::run` resolves the
+source and then still returns "not yet implemented". `inspect`
+accepts a URL but doesn't resolve it yet, since it's still a stub.
+`crates/video-io/tests/resolve_source.rs` tests against a fake
+`yt-dlp` shell script, because YouTube is blocked by the egress
+policy (see Gotchas). The real binary was only checked for argument
+parsing. An actual YouTube download hasn't been verified from this
+environment.
 
 ## Deliberately deferred dependencies
 
@@ -158,6 +174,12 @@ defers loading the shared library to runtime via `dlopen`
 `microsoft/onnxruntime`'s GitHub releases, which isn't blocked) and
 point the env var at it. `reid` will need `ort` too for Phase 4a, with
 the same feature set.
+
+`yt-dlp` (Phase 1c) is an optional *runtime* tool, not a crate. It's
+only needed for URL inputs, and its path comes from `source.ytdlp_path`.
+`video-io` gained `serde`/`serde_json` (sidecar and yt-dlp metadata
+JSON) and `sha2` (sidecar checksum); `sha2` is a new workspace
+dependency.
 
 Similarly, `reqwest`/`tokio`/`serde_json` are already wired into
 `classifier`'s `Cargo.toml` (pure-Rust, no system deps, safe to add
@@ -247,6 +269,21 @@ workflow was added — fmt/clippy are clean with no warnings.
   the compiler rejects the move with `E0505: cannot move out of
   ... because it is borrowed`. See `Detector::new` in
   `crates/detector/src/lib.rs`.
+
+- **YouTube (`www.youtube.com`, `youtu.be`) is blocked by the egress
+  policy** (proxy `CONNECT` → 403), so real `yt-dlp` downloads can't
+  be exercised here or in CI. Test Stage 0 with a fake `yt-dlp` shell
+  script instead (see `crates/video-io/tests/resolve_source.rs`). The
+  real binary is available from `yt-dlp/yt-dlp`'s GitHub releases
+  (`yt-dlp_linux`, standalone, no Python needed), which aren't blocked:
+  useful for checking that it accepts an argument list.
+- **YouTube video IDs are case-sensitive.** An early filename
+  sanitiser lowercased them, so `youtube-dQw4w9WgXcQ.mp4` was written
+  as `youtube-dqw4w9wgxcq.mp4` and the offline cache lookup (which uses
+  the URL's ID verbatim) never hit. Lowercase only the extractor name.
+- **`yt-dlp --dump-single-json` prints `null` to stdout on failure**
+  (exit 1, with `ERROR:` lines on stderr). Check the exit status before
+  parsing stdout, or the real error is replaced by a JSON parse error.
 
 ## Conventions
 

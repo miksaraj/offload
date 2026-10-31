@@ -97,6 +97,15 @@ output with `FrameExtractor` to assert dimensions and non-decreasing
 timestamps; a second test asserts an empty clip list errors. `video-io`
 also has a `#[cfg(test)]` unit test module covering `ClipWriter`'s
 internal range-padding/clamping/merging logic directly.
+`crates/video-io/tests/resolve_source.rs` covers Stage 0 (URL inputs)
+against a fake `yt-dlp` shell script written per test (YouTube is
+unreachable from this environment). It covers: download, then reuse
+across URL forms with no `yt-dlp` call; the sidecar; cookies and
+height-cap passthrough; live, playlist, private and missing-`yt-dlp`
+errors; and `remove_cached_source`. To try the CLI by hand with a URL,
+put an `offload.toml` with `[source] ytdlp_path = "/path/to/fake"` in
+the working directory. `cache` has no `--config` flag and always reads
+`./offload.toml`.
 
 ## Gotchas
 

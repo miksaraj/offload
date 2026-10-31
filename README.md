@@ -10,7 +10,7 @@ You provide a full game video, either a file on disk or a YouTube link. Offload 
 
 ## Status
 
-🚧 **In development.** Architecture and specification are complete. Project skeleton and video I/O (frame extraction + clip assembly) are done — player detection is next. See [CLAUDE.md](./CLAUDE.md#current-state) for the current build state.
+🚧 **In development.** Architecture and specification are complete. Project skeleton and video I/O (frame extraction, clip assembly, and local-file or YouTube input) are done — player detection is next. See [CLAUDE.md](./CLAUDE.md#current-state) for the current build state.
 
 ---
 
@@ -108,7 +108,7 @@ See [SPEC.md](./SPEC.md) for functional requirements, pipeline behaviour, input/
 | Phase | Description | Status |
 |---|---|---|
 | 0 | Project skeleton & tooling | ✅ |
-| 1 | Video I/O (extraction & compilation ✅; YouTube/URL input ⬜) | 🟡 |
+| 1 | Video I/O (extraction, compilation, YouTube/URL input) | ✅ |
 | 2 | Player detection (YOLOv8 + ONNX) | ⬜ |
 | 3 | Multi-object tracking (ByteTrack) | ⬜ |
 | 4 | Player re-identification (OSNet) + match segmentation for multi-match/tournament inputs | ⬜ |
