@@ -150,13 +150,19 @@ Player re-identification via OSNet ONNX model, with an interactive identificatio
 - `prompt_choice` / `prompt_descriptor`: terminal prompts over generic `BufRead`/`Write` (scripted in tests). A box number, or `n` to move to the next candidate frame; re-prompts on invalid input; end of input aborts
 - `identify_interactively(candidates, model, options, input, out) -> Selection { frame, bbox, confidence, descriptor, embedding }`: runs the whole loop and embeds the chosen crop as the reference
 - The orchestration (`Pipeline::identify` in `pipeline-core`) extracts the candidate frames and runs detection at `detector.confidence_threshold`, so only "sure" boxes are offered
-- Confirmation (`/tmp/offload_confirm.jpg`, `[y/N]`) is Phase 4c
+- `identify_from(candidates, start, ..)`: the same loop starting at the `start`-th candidate (a rejected confirmation retries from the next one)
+- `annotate_subject` + `confirm_interactively` / `prompt_confirm`: the confirmation frame (subject green, others grey) and `[y/N]` (default no; end of input aborts)
 
-**Matching (`ReIdMatcher` struct):**
-- `ReIdMatcher::new(reference_embedding, model)`: initialised from the result of `Identifier`
-- `ReIdMatcher::identify(candidates: Vec<(TrackId, Embedding)>) -> Option<TrackId>`: cosine similarity comparison, returns best match above threshold
-- Temporal smoother: maintains a vote buffer per track; only locks identity after N consecutive high-confidence matches
-- Re-entry matching: automatic, no user interaction required after initial lock
+**Identity chaining (`reid::chain` module, Phases 4c/4d; pure logic, no I/O):**
+- `TrackLog { frames: Vec<FrameRecord { timestamp_ms, frame_number, tracks: Vec<(id, Rect)> }>, signatures: HashMap<id, Vec<Embedding>> }`: the tracking output of a scan, with `Tracked` boxes only
+- `SignatureSampler`: picks which tracked boxes to embed on a frame (first eligible frame of a track, then every `signature_interval_ms`, up to `signature_max_samples`, boxes ≥ `min_crop_height_px`)
+- `resolve(log, seed_track, pick_embedding, ChainConfig) -> SubjectTimeline { spans, reentries, rejected_windows }`: offline forward + backward chaining from the seed. A re-entry candidate must clear the absolute floor, beat this video's teammate baseline (the 90th-percentile gallery score of tracks seen alongside the subject) by `reentry_margin`, and beat the runner-up by the same margin. Otherwise the subject is absent and the window slides on
+- `SubjectTimeline::{subject_at, coverage}`
+
+**Orchestration (`pipeline_core::subject`):**
+- `Pipeline::scan(path, start, end, seed, model) -> Scan { log, seed_track }`: detector (at the tracker's low floor) → tracker → signature sampling; force-samples the seed frame and seeds the subject there (best IoU ≥ 0.3 with the pick, else `Tracker::add_track`)
+- `Pipeline::follow_subject(path, options, input, out) -> SubjectResult { selection, log, timeline }`: candidates → pick → confirmation scan (`confirmation_scan_secs`) + chaining → confirmation frame (latest frame with the subject) → `[y/N]`, retrying up to `max_identification_attempts` → full-video scan + chaining
+- `Pipeline::write_subject_debug_frames`: `debug/reid/` frames for `run --debug`
 
 ### `classifier`
 
@@ -225,10 +231,10 @@ INPUT
   ⟳ Confirmation frame shown → user confirms [y/N] → retry on rejection
       │ reference_embedding locked
       ▼
-[reid] Per-frame identity matching (Sub-phase 4B)
-  → Cosine similarity per track per frame
-  → Temporal vote buffer + lock threshold
-  → Output: subject_track_id (the track that is you)
+[reid] Identity chaining (Phases 4c/4d), offline over the full-video track log
+  → Seed = the track the user's pick landed on (no similarity lock)
+  → Gaps bridged by relative appearance evidence over sparse track signatures
+  → Output: SubjectTimeline (track spans) → subject box or absent per sampled frame
   → Cached to: cache/identity.json
       │
       ▼
@@ -257,9 +263,9 @@ OUTPUT
 
 ### Identity re-entry
 
-When the subject's track is lost (goes to `Lost` state — e.g. tackled to ground, leaves frame) and later a new track appears that could be the subject re-entering, the ReID matcher is re-queried. If similarity exceeds the re-entry threshold, the new track is assigned as the subject and tracking continues. This prevents the subject from "disappearing" after a tackle or ruck.
+The tracker leads; appearance only bridges gaps. While the subject's track lives, it *is* the subject, so there's no per-frame similarity check that could hand the identity to a teammate mid-play. When the track ends (tackled, in a ruck, out of shot) and the gap outlasts the tracker's own lost-track memory, the subject comes back as a new track. Identity chaining (`reid::chain`) then decides, offline over the full track log, which later track (if any) is them. The decision is relative, not a fixed similarity threshold. Real club footage showed same-kit teammates overlapping heavily with the subject's own appearance, so a re-entry has to beat the runner-up and this video's own teammate baseline, built from players seen alongside the subject and therefore known not to be them. When nothing clearly wins, the subject stays absent: missing seconds cost less than a teammate's play in the reel.
 
-The same mechanism handles longer absences without any special-casing: a sub coming on mid-match, or a player going on/off repeatedly in 7s/touch, is just a longer-than-usual `Lost` state followed by re-entry — re-entry has no upper bound on gap length, only on similarity. The one place that *does* need special-casing is a multi-match input (see "Match segmentation" below): identity must not be assumed to carry across a match boundary by track continuity, since the subject may legitimately not appear in a later match at all.
+The same mechanism handles longer absences without special-casing: a sub coming on mid-match, or on/off rotations in 7s/touch, is a long gap that the search window slides across. Chaining runs backward from the seed too, so a pick made mid-video still recovers the subject's earlier appearances. The one place that *does* need special-casing is a multi-match input (see "Match segmentation" below): identity must not be assumed to carry across a match boundary by track continuity, since the subject may legitimately not appear in a later match at all (Phase 4e).
 
 ### Match segmentation
 
@@ -424,7 +430,7 @@ Cache lives at `<output_dir>/.offload_cache/<input_video_hash>/`.
 | `detections.json` | `Vec<(frame_number, Vec<Detection>)>` | Input video or detection config changes |
 | `tracks.json` | `Vec<(frame_number, Vec<Track>)>` | Detections or tracker config changes |
 | `segments.json` | `Vec<MatchSegment>` | Detections or `segmentation` config changes |
-| `identity.json` | `{ subject_track_id, confidence_history }` | Tracks, segments, or reference image changes |
+| `identity.json` | `{ pick, subject spans, reentries }` | Tracks, segments, the pick, or `reid` chaining config changes |
 | `moments.json` | `Vec<Moment>` | Identity, classifier config, or prompt changes |
 
 Cache validity is checked by hashing the inputs (video file, reference image, relevant config section) and comparing against a stored manifest. Stale cache entries are automatically discarded.
@@ -483,6 +489,10 @@ Downloading first, rather than handing FFmpeg a stream URL, is required by how t
 - Stage caches are keyed by the source file's content hash.
 
 A local file makes all of these trivial, and later runs work fully offline.
+
+### Why does the tracker lead identity instead of per-frame appearance matching?
+
+The original design locked the subject when a track's mean cosine similarity to the reference passed 0.72. Measuring OSNet on real footage (CLAUDE.md, Phase 4a) killed that: different same-kit players in one frame reach 0.73 at p95, while the same player 3 s later has a median of 0.73. A fixed threshold would either miss the subject or wander onto teammates. Tracker continuity is far more reliable than appearance over short spans, so it owns identity, and appearance is used only for gap decisions, comparatively and against this video's own known-negative baseline. It's also much cheaper: appearance is sampled sparsely per track (about once a second, at most 8 times) instead of embedding every player on every frame.
 
 ### Why separate `reid` and `tracker` crates?
 

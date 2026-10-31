@@ -12,3 +12,4 @@ tracing.workspace = true
 ort.workspace = true
 ndarray.workspace = true
 image.workspace = true
+serde.workspace = true

@@ -230,7 +230,7 @@ which is now public, so there's a single ONNX Runtime init per process.
 inference; batch dimension N is dynamic. Crops are stretched to
 128×256, RGB, ImageNet-normalised, then L2-normalised; `cosine` is a
 dot product. `crate::crop` copies the box out of a `Frame`, clamped.
-(`ReIdMatcher` is still a stub for 4c/4d.)
+
 `crates/reid/tests/embed_real_crops.rs` uses real YOLOv8n boxes on
 `bus.jpg`: the same person under box jitter scores 0.89–0.92, different
 people 0.35–0.37, and batched output equals one-at-a-time output.
@@ -256,6 +256,55 @@ Checked on the user's clip with a scripted pick: the frame at 4.1 s
 was offered with 13 readable numbered players, and the goalpost false
 positive wasn't offered.
 
+Phases 4c/4d (seeding, confirmation, identity chaining) are complete,
+implementing the user-approved redesign: **the tracker leads, and
+appearance only bridges gaps, comparatively**. SPEC Stage 4 and
+ARCHITECTURE ("Identity re-entry", "Why does the tracker lead…") were
+rewritten to match. The old `lock_threshold`/`vote_window`/
+`reentry_vote_window`/`max_identification_frame` config keys are gone;
+the new `[reid]` keys are in SPEC §6.
+- `reid::chain` is pure logic: `TrackLog`, `SignatureSampler`,
+  `resolve` → `SubjectTimeline`. Acceptance requires clearing the floor
+  (0.55), beating this video's teammate baseline (p90 gallery score of
+  tracks seen *alongside* the subject) by `reentry_margin`, and beating
+  the runner-up by the same margin; otherwise the subject is absent and
+  the window slides on. Chaining runs forward and backward from the
+  seed. 11 unit tests use synthetic "same kit" embeddings (a shared
+  axis), covering the bridge, ambiguity, lone teammate, backward,
+  substitution, min samples, floor and gallery cap.
+- `Tracker::add_track` seeds the subject from the pick when the picked
+  box scored below the new-track threshold.
+- `reid::ReIdConfig` now derives `Deserialize` and is embedded directly
+  as `Config::reid`; `ReIdSection` is gone (same pattern as
+  `SourceConfig`).
+- `pipeline_core::subject` holds the orchestration: `scan` (detector →
+  tracker → signature sampling, seed frame force-sampled),
+  `follow_subject` (pick → 60 s confirmation scan + chaining →
+  confirmation frame at the *latest* subject frame → `[y/N]`, retrying
+  from the next candidate → full-video scan + chaining), and
+  `write_subject_debug_frames`, which writes `debug/reid/` with track-ID
+  labels. `offload run` now goes through all of Stage 4, prints
+  coverage, re-entries and ambiguous gaps, writes debug frames with
+  `--debug`, then stops at "Phase 5 not yet implemented".
+- `crates/pipeline-core/tests/follow_subject.rs` is the known-answer
+  end-to-end test. A `bus.jpg` video has the picked man painted over
+  for 5 s with ffmpeg `drawbox`, longer than `max_lost_frames`, so he
+  returns as a new track. Chaining bridges it to the right man with real
+  OSNet signatures and reports him absent while covered. A second test
+  covers the retry loop giving up after `max_identification_attempts`.
+  Together they take about 80 s in a debug build.
+
+**Real clip, picking a green-kit player (#9 at 4.1 s):** the seed track
+is followed through a camera pan, 3.6–7.9 s (backward chaining picked
+up the track's life before the pick), until he leaves the shot. All 3
+later re-entry candidates were refused: the best scored 0.70 against a
+teammate baseline of 0.72. Judged by eye with ID-labelled debug frames,
+the best candidate (near the posts at 11.8 s) is most likely a
+teammate, since the camera kept panning away from where he left. That's
+consistent with "missing beats wrong". Coverage was 18%, because the
+camera follows the ball rather than him. Ground truth for this clip is
+unknown, so this is a sanity check, not a measurement.
+
 **Real-footage ReID measurement (user's 25 s clip, tracked players
 ≥ 40 px tall, 8 fps): appearance alone barely separates same-kit
 teammates here.** Cosine similarity:
@@ -274,11 +323,8 @@ similarity equal. That confirmed the channel order. Caveats: the clip
 is low-res (706 px wide), and "different tracks" includes some
 same-person pairs split across IDs, which inflates that row. **SPEC's
 `reid.lock_threshold = 0.72` / `reentry_threshold = 0.68` sit inside the
-overlap, so absolute thresholds alone won't work for 4c/4d.** Re-entry
-needs relative evidence (best candidate vs runner-up margin over a vote
-window) and spatial/temporal plausibility, with the tracker's own ID
-continuity as the primary identity signal. Settle that design with the
-user before building 4c/4d.
+overlap, so absolute thresholds alone won't work.** That finding drove
+the 4c/4d redesign above.
 
 Phase 1c (URL / YouTube source input) is complete: SPEC.md Stage 0,
 in `crates/video-io/src/source.rs`. `resolve_source(input, &SourceConfig,
@@ -470,6 +516,18 @@ It's a compile-time proc-macro pulled in through `image` → `ravif` →
   each other**: `cargo test` runs tests in a file in parallel. Give each
   test its own path (see `bus_video(name)` in
   `crates/pipeline-core/tests/identify.rs`).
+- **Tests that write an executable and then run it race with
+  parallel tests: `ETXTBSY` ("text file busy").** If another test
+  thread forks while this one still has the new script open for
+  writing, the child inherits the write fd, and exec'ing the script
+  fails until that child execs. This made the Phase 1c fake-`yt-dlp`
+  tests fail about 15% of the time, misreported as "yt-dlp could not be
+  run". Fix: write one shared script under `std::sync::Once` and give
+  each test a symlink to it, with the script reading per-test data
+  relative to `$0` (see `shared_script` in
+  `crates/video-io/tests/resolve_source.rs`). `YtDlp::new` now only says
+  "install yt-dlp" for an actual `NotFound`. To check that a flake is
+  gone, loop the test binary about 100 times.
 - **YouTube video IDs are case-sensitive.** An early filename
   sanitiser lowercased them, so `youtube-dQw4w9WgXcQ.mp4` was written
   as `youtube-dqw4w9wgxcq.mp4` and the offline cache lookup (which uses

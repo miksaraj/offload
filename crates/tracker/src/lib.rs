@@ -150,6 +150,29 @@ impl Tracker {
         &self.config
     }
 
+    /// Creates a confirmed, `Tracked` track at `bbox` on the current frame
+    /// and returns its ID. Used to seed the subject from the user's pick
+    /// when the picked box scored below the new-track threshold (so
+    /// `update` didn't create a track for it). Call after `update` for
+    /// the frame the box belongs to; the track is matched like any other
+    /// from the next frame on.
+    pub fn add_track(&mut self, bbox: Rect, confidence: f32) -> u64 {
+        let (mean, cov) = self.kf.initiate(&rect_to_xyah(&bbox));
+        let id = self.next_track_id;
+        self.next_track_id += 1;
+        self.tracks.push(STrack {
+            id,
+            mean,
+            cov,
+            state: TrackState::Tracked,
+            confirmed: true,
+            confidence,
+            start_frame: self.frame,
+            last_update_frame: self.frame,
+        });
+        id
+    }
+
     /// Advances one frame. Returns every confirmed track that is
     /// `Tracked` or `Lost` after this frame (removed tracks are dropped),
     /// sorted by `track_id`. Detections below `low_confidence_threshold`
@@ -555,6 +578,28 @@ mod tests {
         tr.update(vec![det(100.0, 100.0, 0.9)]).unwrap();
         let tracks = tr.update(vec![det(100.0, 100.0, 0.9)]).unwrap();
         assert_eq!(ids(&tracks), vec![2]);
+    }
+
+    #[test]
+    fn added_tracks_are_confirmed_and_followed() {
+        let mut tr = Tracker::new(TrackerConfig::default());
+        tr.update(vec![]).unwrap();
+        // A 0.3 box would never start a track by itself.
+        let id = tr.add_track(det(100.0, 100.0, 0.3).bbox, 0.3);
+        assert_eq!(id, 1);
+        for f in 1..10 {
+            let tracks = tr
+                .update(vec![det(100.0 + 2.0 * f as f32, 100.0, 0.3)])
+                .unwrap();
+            assert_eq!(ids(&tracks), vec![id], "frame {f}");
+        }
+        // IDs keep counting from there.
+        tr.update(vec![det(100.0 + 20.0, 100.0, 0.3), det(500.0, 300.0, 0.9)])
+            .unwrap();
+        let tracks = tr
+            .update(vec![det(100.0 + 22.0, 100.0, 0.3), det(500.0, 300.0, 0.9)])
+            .unwrap();
+        assert_eq!(ids(&tracks), vec![1, 2]);
     }
 
     #[test]

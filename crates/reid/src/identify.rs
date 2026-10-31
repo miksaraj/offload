@@ -209,6 +209,8 @@ pub fn prompt_descriptor(input: &mut impl BufRead, out: &mut impl Write) -> Resu
 #[derive(Debug, Clone)]
 pub struct InteractionOptions {
     pub image_path: PathBuf,
+    /// Where the confirmation frame goes.
+    pub confirm_path: PathBuf,
     pub open_viewer: bool,
 }
 
@@ -216,6 +218,7 @@ impl Default for InteractionOptions {
     fn default() -> Self {
         Self {
             image_path: std::env::temp_dir().join("offload_select.jpg"),
+            confirm_path: std::env::temp_dir().join("offload_confirm.jpg"),
             open_viewer: true,
         }
     }
@@ -232,11 +235,25 @@ pub fn identify_interactively(
     input: &mut impl BufRead,
     out: &mut impl Write,
 ) -> Result<Selection> {
+    identify_from(candidates, 0, model, options, input, out)
+}
+
+/// [`identify_interactively`], starting at the `start`-th candidate in
+/// presentation order (wrapping). A rejected confirmation re-runs
+/// identification from the next candidate frame.
+pub fn identify_from(
+    candidates: &[Candidate],
+    start: usize,
+    model: &mut ReIdModel,
+    options: &InteractionOptions,
+    input: &mut impl BufRead,
+    out: &mut impl Write,
+) -> Result<Selection> {
     let order = presentation_order(candidates);
     if order.is_empty() {
         return Err(ReIdError::NoPlayers);
     }
-    let mut pos = 0;
+    let mut pos = start % order.len();
     loop {
         let cand = &candidates[order[pos]];
         let numbered = number_detections(&cand.detections);
@@ -287,6 +304,64 @@ pub fn identify_interactively(
             }
         }
     }
+}
+
+/// The confirmation image: the subject in a thick green box, everyone
+/// else in a thin grey one.
+pub fn annotate_subject(frame: &Frame, subject: &Rect, others: &[Rect]) -> RgbImage {
+    let mut img: RgbImage = RgbImage::from_raw(frame.width, frame.height, frame.pixels.clone())
+        .expect("Frame pixel buffer length must be width * height * 3");
+    let thickness = (frame.width.max(frame.height) / 300).max(3);
+    for r in others {
+        draw_rect(&mut img, r, 1, Rgb([170, 170, 170]));
+    }
+    draw_rect(&mut img, subject, thickness, Rgb([0, 230, 0]));
+    img
+}
+
+/// `[y/N]` prompt: `y`/`yes` (any case) is yes, anything else (including
+/// empty) is no; end of input aborts.
+pub fn prompt_confirm(input: &mut impl BufRead, out: &mut impl Write) -> Result<bool> {
+    say(out, "Is this correct? [y/N]: ")?;
+    let line = read_line(input)?;
+    Ok(matches!(line.to_ascii_lowercase().as_str(), "y" | "yes"))
+}
+
+/// Shows the confirmation frame and asks whether the green box is the
+/// user.
+pub fn confirm_interactively(
+    frame: &Frame,
+    subject: &Rect,
+    others: &[Rect],
+    image_path: &Path,
+    open_viewer: bool,
+    input: &mut impl BufRead,
+    out: &mut impl Write,
+) -> Result<bool> {
+    annotate_subject(frame, subject, others)
+        .save(image_path)
+        .map_err(|e| ReIdError::Identification(format!("{}: {e}", image_path.display())))?;
+    let opened = open_viewer && open_in_viewer(image_path);
+    say(
+        out,
+        "\n── Confirmation ────────────────────────────────────────\n",
+    )?;
+    say(
+        out,
+        &format!(
+            "A confirmation frame ({}) has been saved to: {}\n",
+            format_ms(frame.timestamp_ms),
+            image_path.display()
+        ),
+    )?;
+    if !opened {
+        say(out, "Open it in an image viewer to continue.\n")?;
+    }
+    say(
+        out,
+        "The highlighted player (green box) is who Offload will track.\n\n",
+    )?;
+    prompt_confirm(input, out)
 }
 
 /// `m:ss.mmm`, the timestamp format the dry-run table uses.
@@ -415,6 +490,38 @@ mod tests {
         assert_eq!(*img.get_pixel(20, 50), yellow); // box edge
         assert_eq!(*img.get_pixel(20, 29), yellow); // label background above it
         assert_eq!(*img.get_pixel(30, 60), Rgb([0, 0, 0])); // interior untouched
+    }
+
+    #[test]
+    fn confirm_prompt_defaults_to_no() {
+        for (text, want) in [
+            ("y\n", true),
+            ("YES\n", true),
+            ("\n", false),
+            ("n\n", false),
+            ("maybe\n", false),
+        ] {
+            let mut input = Cursor::new(text);
+            assert_eq!(
+                prompt_confirm(&mut input, &mut Vec::new()).unwrap(),
+                want,
+                "{text:?}"
+            );
+        }
+        assert!(matches!(
+            prompt_confirm(&mut Cursor::new(""), &mut Vec::new()),
+            Err(ReIdError::Aborted)
+        ));
+    }
+
+    #[test]
+    fn confirmation_image_highlights_the_subject() {
+        let f = frame(0);
+        let subject = det(20.0, 20.0).bbox;
+        let other = det(60.0, 20.0).bbox;
+        let img = annotate_subject(&f, &subject, &[other]);
+        assert_eq!(*img.get_pixel(20, 40), Rgb([0, 230, 0]));
+        assert_eq!(*img.get_pixel(60, 40), Rgb([170, 170, 170]));
     }
 
     #[test]
