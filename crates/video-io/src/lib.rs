@@ -1,7 +1,15 @@
 //! Frame extraction and clip assembly via FFmpeg.
 //!
 //! Frame extraction (Phase 1a) and clip assembly (Phase 1b) are both
-//! implemented on top of `ffmpeg-next`.
+//! implemented on top of `ffmpeg-next`. Source resolution (Stage 0,
+//! Phase 1c) lives in [`source`]: it turns a path or URL `--input` into
+//! the local file those read.
+
+pub mod source;
+
+pub use source::{
+    is_url, remove_cached_source, resolve_source, ResolvedSource, SourceConfig, SourceOrigin,
+};
 
 use std::path::Path;
 
@@ -17,6 +25,33 @@ pub enum VideoIoError {
     Decode(String),
     #[error("encode error: {0}")]
     Encode(String),
+    #[error(
+        "input is a URL but yt-dlp could not be run (tried `{0}`). Install it \
+         (`brew install yt-dlp`, `pipx install yt-dlp`, or a standalone binary from \
+         https://github.com/yt-dlp/yt-dlp/releases) or set `source.ytdlp_path` in offload.toml"
+    )]
+    YtDlpNotFound(String),
+    #[error(
+        "{0} is a playlist, not a single video; Offload processes one source video per run \
+         — pass the URL of the video itself"
+    )]
+    SourcePlaylist(String),
+    #[error("unsupported URL — Offload supports YouTube video URLs:\n{0}")]
+    SourceUnsupported(String),
+    #[error(
+        "video needs a signed-in account (private, members-only, age-restricted, or a bot check); \
+         set `source.cookies_from_browser` in offload.toml to use your browser's YouTube login:\n{0}"
+    )]
+    SourceAuthRequired(String),
+    #[error(
+        "source is a live or not-yet-aired stream ({0}); only pre-recorded footage is supported \
+         — re-run once the stream has finished"
+    )]
+    SourceLive(String),
+    #[error("video unavailable:\n{0}")]
+    SourceUnavailable(String),
+    #[error("source download failed: {0}")]
+    Source(String),
 }
 
 pub type Result<T> = std::result::Result<T, VideoIoError>;

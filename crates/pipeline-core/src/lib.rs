@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use thiserror::Error;
+use video_io::{ResolvedSource, SourceConfig, VideoIoError};
+
+pub use video_io::is_url;
 
 #[derive(Debug, Error)]
 pub enum PipelineError {
@@ -17,6 +20,17 @@ pub enum PipelineError {
     Config(String),
     #[error("stage error: {0}")]
     Stage(String),
+    #[error(transparent)]
+    Source(VideoIoError),
+}
+
+impl From<VideoIoError> for PipelineError {
+    fn from(err: VideoIoError) -> Self {
+        match err {
+            VideoIoError::NotFound(p) => PipelineError::InputNotFound(PathBuf::from(p)),
+            other => PipelineError::Source(other),
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, PipelineError>;
@@ -97,6 +111,7 @@ impl Default for CacheConfig {
 pub struct Config {
     pub models: ModelsConfig,
     pub ollama: OllamaConfig,
+    pub source: SourceConfig,
     pub video: VideoConfig,
     pub cache: CacheConfig,
 }
@@ -120,20 +135,46 @@ impl Pipeline {
         Self { config }
     }
 
-    pub fn run(&self, input: &Path, _output: &Path) -> Result<()> {
-        if !input.exists() {
-            return Err(PipelineError::InputNotFound(input.to_path_buf()));
-        }
+    /// `input` is a local path or an http(s) URL (SPEC.md Stage 0).
+    pub fn run(&self, input: &str, _output: &Path) -> Result<()> {
+        let source = self.resolve_source(input)?;
+        tracing::info!(path = %source.path.display(), origin = ?source.origin, "source resolved");
         Err(PipelineError::Stage("not yet implemented".into()))
     }
 
+    /// Stage 0: turn `--input` into a local file, downloading URL sources
+    /// into the cache (or reusing an earlier download).
+    pub fn resolve_source(&self, input: &str) -> Result<ResolvedSource> {
+        Ok(video_io::resolve_source(
+            input,
+            &self.config.source,
+            &self.cache_root(),
+        )?)
+    }
+
+    /// Removes the cached download for a URL input; no-op for local
+    /// paths. Returns the files removed.
+    pub fn clear_cached_source(&self, input: &str) -> Result<Vec<PathBuf>> {
+        Ok(video_io::remove_cached_source(
+            input,
+            &self.config.source,
+            &self.cache_root(),
+        )?)
+    }
+
+    /// Base cache directory (`cache.dir`, default `.offload_cache`).
+    pub fn cache_root(&self) -> PathBuf {
+        PathBuf::from(
+            self.config
+                .cache
+                .dir
+                .clone()
+                .unwrap_or_else(|| ".offload_cache".to_string()),
+        )
+    }
+
     pub fn cache_dir_for(&self, input: &Path) -> PathBuf {
-        let base = self
-            .config
-            .cache
-            .dir
-            .clone()
-            .unwrap_or_else(|| ".offload_cache".to_string());
-        Path::new(&base).join(input.file_name().unwrap_or_default())
+        self.cache_root()
+            .join(input.file_name().unwrap_or_default())
     }
 }

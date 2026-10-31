@@ -8,7 +8,7 @@ fn parses_run_subcommand() {
 
     match cli.command {
         Command::Run { input, output, .. } => {
-            assert_eq!(input.to_str(), Some("game.mp4"));
+            assert_eq!(input, "game.mp4");
             assert_eq!(output.to_str(), Some("highlights.mp4"));
         }
         other => panic!("expected Run, got {other:?}"),
@@ -20,6 +20,16 @@ fn parses_inspect_cache_and_models_subcommands() {
     assert!(Cli::try_parse_from(["offload", "inspect", "--input", "game.mp4"]).is_ok());
     assert!(Cli::try_parse_from(["offload", "cache", "--clear"]).is_ok());
     assert!(Cli::try_parse_from(["offload", "models", "--download"]).is_ok());
+}
+
+#[test]
+fn run_accepts_a_url_input() {
+    let url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=95s";
+    let cli = Cli::try_parse_from(["offload", "run", "--input", url]).expect("URL should parse");
+    match cli.command {
+        Command::Run { input, .. } => assert_eq!(input, url),
+        other => panic!("expected Run, got {other:?}"),
+    }
 }
 
 #[test]

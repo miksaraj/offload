@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use anyhow::Result;
 use clap::Parser;
 use offload::cli::{Cli, Command};
@@ -43,7 +45,21 @@ fn main() -> Result<()> {
         }
         Command::Cache { clear, input } => {
             tracing::info!(clear, ?input, "offload cache");
-            tracing::warn!("cache management is not yet implemented");
+            match input.as_deref() {
+                Some(input) if clear && pipeline_core::is_url(input) => {
+                    // `cache` has no --config flag; use the default config path.
+                    let config = Config::load(Path::new("offload.toml")).unwrap_or_default();
+                    let removed = Pipeline::new(config).clear_cached_source(input)?;
+                    if removed.is_empty() {
+                        tracing::info!("no downloaded source cached for {input}");
+                    }
+                    for path in removed {
+                        tracing::info!(path = %path.display(), "removed cached source");
+                    }
+                    tracing::warn!("stage cache management is not yet implemented");
+                }
+                _ => tracing::warn!("cache management is not yet implemented"),
+            }
         }
         Command::Models { download, list } => {
             tracing::info!(download, list, "offload models");

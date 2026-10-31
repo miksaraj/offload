@@ -105,6 +105,7 @@ The brain of the system. Contains no domain logic itself — only orchestration.
 All interaction with video files via `ffmpeg-next`, plus resolving where the source video comes from.
 
 - `resolve_source(input: &str, config: &SourceConfig, cache_dir: &Path) -> Result<ResolvedSource>`: Stage 0. Passes a local path through unchanged. A URL is downloaded via a `yt-dlp` subprocess (`std::process::Command`, so no new crate dependency) into `<cache_dir>/sources/` and returns the downloaded path. A download already cached under the same video ID is reused without touching the network
+- `remove_cached_source(input, config, cache_dir)`: deletes a URL input's download, sidecar, and any `.part` file (used by `offload cache --clear --input <URL>`)
 - `FrameExtractor`: opens a video, iterates decoded frames as `Frame` structs
 - `ClipWriter`: accepts a `Vec<ClipSpec>` (start/end timestamps + optional label), extracts segments, concatenates, transcodes to output
 - Handles frame rate normalisation and resolution scaling
@@ -180,7 +181,7 @@ INPUT
       ▼
 [video-io] Source resolution (Stage 0)
   → Local path: passed through unchanged
-  → URL: yt-dlp download → cache/sources/<extractor>-<video_id>.mp4 + source.json
+  → URL: yt-dlp download → cache/sources/<extractor>-<video_id>.mp4 + .source.json sidecar
   → ResolvedSource { path, origin }; everything below reads `path` only
       │
       ▼
@@ -408,7 +409,7 @@ Cache lives at `<output_dir>/.offload_cache/<input_video_hash>/`.
 
 | File | Contents | Invalidated when |
 |---|---|---|
-| `../sources/<extractor>-<video_id>.mp4` + `source.json` | Downloaded source video for a URL input (Stage 0) | Only by `offload cache --clear --input <URL>`; `--no-cache` doesn't re-download. Sits beside the per-video directories rather than inside one, because the content hash isn't known until the download finishes |
+| `../sources/<extractor>-<video_id>.mp4` + `.source.json` | Downloaded source video for a URL input (Stage 0) | Only by `offload cache --clear --input <URL>`; `--no-cache` doesn't re-download. Sits beside the per-video directories rather than inside one, because the content hash isn't known until the download finishes |
 | `detections.json` | `Vec<(frame_number, Vec<Detection>)>` | Input video or detection config changes |
 | `tracks.json` | `Vec<(frame_number, Vec<Track>)>` | Detections or tracker config changes |
 | `segments.json` | `Vec<MatchSegment>` | Detections or `segmentation` config changes |
