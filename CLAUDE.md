@@ -198,6 +198,18 @@ from `microsoft/onnxruntime`'s GitHub releases and exports
 four checks were run locally against the current scaffold before this
 workflow was added — fmt/clippy are clean with no warnings.
 
+## Security advisories
+
+GitHub's Dependabot alerts can't be read from a Claude Code cloud
+session; there's no tool for them. Reproduce them locally with
+`cargo install cargo-audit --locked && cargo audit`, which checks
+`Cargo.lock` against the same RustSec database and usually reports
+more than the alert summary shows. Fix with targeted `cargo update -p
+<crate>`, which is lockfile-only when a semver-compatible patch exists.
+Known remaining warning: `paste` is unmaintained (RUSTSEC-2024-0436).
+It's a compile-time proc-macro pulled in through `image` → `ravif` →
+`rav1e`, with no patched release, so it's accepted for now.
+
 ## Gotchas
 
 - **`tracing` field shorthand collides with a local variable named
