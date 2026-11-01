@@ -368,7 +368,21 @@ impl<'a> YtDlp<'a> {
                 );
                 Ok(Self { config })
             }
-            Ok(_) | Err(_) => Err(VideoIoError::YtDlpNotFound(config.ytdlp_path.clone())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Err(VideoIoError::YtDlpNotFound(config.ytdlp_path.clone()))
+            }
+            // It exists but couldn't run (permissions, text file busy, ...)
+            // or exited non-zero: report that, not "install yt-dlp".
+            Err(e) => Err(VideoIoError::Source(format!(
+                "running `{} --version`: {e}",
+                config.ytdlp_path
+            ))),
+            Ok(out) => Err(VideoIoError::Source(format!(
+                "`{} --version` failed ({}): {}",
+                config.ytdlp_path,
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ))),
         }
     }
 

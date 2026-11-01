@@ -24,6 +24,7 @@ fn config() -> Config {
 fn options(name: &str) -> reid::InteractionOptions {
     reid::InteractionOptions {
         image_path: std::env::temp_dir().join(format!("offload_test_select_{name}.jpg")),
+        confirm_path: std::env::temp_dir().join(format!("offload_test_confirm_{name}.jpg")),
         open_viewer: false,
     }
 }

@@ -32,7 +32,7 @@ fn main() -> Result<()> {
             );
             let config = Config::load(&config).unwrap_or_default();
             let pipeline = Pipeline::new(config);
-            pipeline.run(&input, &output)?;
+            pipeline.run(&input, &output, debug_mode)?;
         }
         Command::Inspect {
             input,

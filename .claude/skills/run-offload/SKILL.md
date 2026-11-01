@@ -140,12 +140,19 @@ matches one-at-a-time output.
 OSNet embedding) on a short video it builds from `bus.jpg` with the
 `ffmpeg` CLI.
 
-**Trying the interactive pick by hand:** `offload run -i <clip>` stops
-at a numbered-boxes prompt and writes `/tmp/offload_select.jpg`
-(`xdg-open` usually isn't available in the container, so read the file
-directly). Script the answers with `printf '3\nblue 4\n' | offload run ...`.
-`run` then stops with "Phase 4c not yet implemented" (exit 1); that's
-expected for now.
+**Trying Stage 4 by hand:** `offload run -i <clip>` stops at a
+numbered-boxes prompt (`/tmp/offload_select.jpg`), then after a short
+scan at a confirmation prompt (`/tmp/offload_confirm.jpg`, subject in
+green). `xdg-open` usually isn't available in the container, so read
+the files directly. Script the answers: `printf '9\n\ny\n' | offload
+run --debug -i <clip> -c <cfg>` (pick 9, no descriptor, confirm). It
+prints coverage and re-entries, writes `debug/reid/` frames with
+track-ID labels, then stops at "Phase 5 not yet implemented" (exit 1,
+expected). Add `RUST_LOG=reid=debug` to log every re-entry decision
+(best, score, runner-up, baseline), and match the IDs to the debug
+frames. Use a release build for whole clips.
+`crates/pipeline-core/tests/follow_subject.rs` is the known-answer
+occlusion test; it takes about 80 s in debug.
 
 **Visual check on real footage:** `RUST_LOG=info ./target/debug/offload
 inspect -i <clip or URL> -d 10 -o /tmp/inspect` writes one annotated

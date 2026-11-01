@@ -124,10 +124,10 @@ If segmentation is inactive, all downstream stages behave exactly as today (one 
 
 ### Stage 4 — Player Re-Identification
 
-**Input:** per-frame track list, ReID model, user interaction  
-**Output:** `subject_track_id: u64`
+**Input:** per-frame track list with appearance signatures, ReID model, user interaction  
+**Output:** subject timeline: `(track_id, first_frame, last_frame)` spans, plus per-sampled-frame subject presence
 
-This stage has two sub-phases: **interactive identification** (run once before the main tracking pass) and **per-frame ReID matching** (run across the full video).
+This stage has two parts: **interactive identification and confirmation**, run once before the main pass, and **identity chaining**, run offline over the full video's track log.
 
 #### Sub-phase 4A — Interactive Identification
 
@@ -157,40 +157,45 @@ Before the full video is processed, the pipeline pauses to let the user identify
 
 If the selected player is not detected with sufficient confidence in the candidate frame, offer to try a different candidate frame (cycle through the other candidates extracted in step 1).
 
-#### Sub-phase 4B — Confirmation
+#### Identity model (why the tracker leads and appearance only breaks ties)
 
-After the reference embedding is established, run a short pre-scan (first `reid.confirmation_scan_secs`, default: 60 seconds of footage) to find the most probable subject track:
+The subject's identity follows the **tracker**: once a track is the subject, it stays the subject for as long as that track lives. Appearance (OSNet) is consulted only to bridge *gaps*, after the subject's track is lost and a new track might be them coming back. This is deliberate. Measured on real club footage, same-kit teammates are too similar for an absolute similarity threshold to separate them reliably: different players in the same frame reach cosine 0.73 at the 95th percentile, while the same player 3 s later has a median of 0.73 (CLAUDE.md, Phase 4a). So appearance decisions are always **relative** (best candidate vs runner-up, and vs players known not to be the subject), never "similarity above X means it's you". When the evidence isn't clear, Offload leaves the subject absent rather than guessing. A missing few seconds costs less than a teammate's play in your reel.
 
-1. Run ReID matching (as described below) on the pre-scan frames
-2. Take the track with the highest cumulative cosine similarity across the pre-scan
-3. Save an annotated confirmation frame showing only that track highlighted in green, to `/tmp/offload_confirm.jpg`
-4. Open it in the system viewer and prompt:
+#### Track appearance signatures (collected during tracking)
+
+While tracking, each track gets a sparse **appearance signature**: OSNet embeddings of its crop at the first eligible frame and then every `reid.signature_interval_ms` (default: 1000 ms) while it is `Tracked`, up to `reid.signature_max_samples` (default: 8) per track. A crop is eligible only if its box is at least `reid.min_crop_height_px` (default: 40) tall, since smaller crops carry too little appearance information. All eligible crops in a frame are embedded in one batch. This is the only per-frame ReID cost, and it is bounded by the sampling rather than by frame rate × players.
+
+#### Sub-phase 4B — Seeding and confirmation
+
+The subject is seeded **directly from the user's pick**. There is no similarity search to find "the most probable" track:
+
+1. Run detection and tracking from the selected candidate frame onward for `reid.confirmation_scan_secs` (default: 60 s). On the first frame, the track whose box best overlaps the picked box (IoU ≥ 0.3) becomes the **seed track**. If none does (the picked box scored below the tracker's new-track threshold), a confirmed track is created from the picked box.
+2. Follow the subject through the scan with identity chaining (below), so a re-entry inside the first minute is exercised too
+3. Save a confirmation frame to `/tmp/offload_confirm.jpg`: the latest scan frame where the subject is `Tracked`, with the subject in a green box and other players in thin grey boxes. Late in the scan rather than early, so it shows that tracking held. Open it in the system viewer and prompt:
    ```
    ── Confirmation ────────────────────────────────────────
-   A confirmation frame has been saved to: /tmp/offload_confirm.jpg
+   A confirmation frame (0:58.250) has been saved to: /tmp/offload_confirm.jpg
    The highlighted player (green box) is who Offload will track.
 
    Is this correct? [y/N]: _
    ```
-5. If `y`: commit the `reference_embedding` and proceed to full-video ReID matching
-6. If `n`: discard the current reference embedding and re-run Sub-phase 4A with a different candidate frame; repeat up to `reid.max_identification_attempts` (default: 5) times before exiting with an error
+4. If `y`: commit the pick and proceed to the full-video pass
+5. If `n`: re-run Sub-phase 4A from its next candidate frame; repeat up to `reid.max_identification_attempts` (default: 5) times before exiting with an error. End of input aborts
 
-#### Per-Frame ReID Matching
+#### Full-video pass and identity chaining
 
-Once the `reference_embedding` is established:
+After confirmation, Stages 2–3 run over the whole video, collecting track appearance signatures. The track at the pick's timestamp that best overlaps the picked box (IoU ≥ 0.3, or the nearest sampled frame's best match) is the seed. Identity is then resolved **offline over the finished track log**, in both directions from the seed, which is why a subject who appears before the pick time is still found:
 
-- For each frame, for each active track: extract the bounding box crop, resize to 256×128, run OSNet inference
-- Compute cosine similarity between the track's embedding and `reference_embedding`
-- Maintain a sliding vote buffer of length `reid.vote_window` (default: 10 frames) per track
-- A track is "locked" as the subject when its mean cosine similarity exceeds `reid.lock_threshold` (default: 0.72) for the duration of the vote window
-- Once locked, the subject track ID is fixed until that track is removed
-
-#### Re-Entry Handling
-
-- When the subject's track moves to `Lost` state (e.g. tackled to ground, enters a ruck, leaves frame), re-entry matching is activated
-- On each subsequent frame, any new track with cosine similarity above `reid.reentry_threshold` (default: 0.68) is candidate for re-assignment as the subject
-- Re-entry uses a shorter vote window (`reid.reentry_vote_window`, default: 5 frames)
-- Re-entry does **not** prompt the user; it is automatic
+1. The **gallery** starts as the pick's embedding plus the seed track's signatures. Each accepted track adds its signatures, capped at `reid.gallery_max_size` (default: 64) by dropping the oldest
+2. **Known negatives**: any track that is `Tracked` at the same time as a subject track can't be the subject. Their gallery scores give this video's own "how similar do teammates look" baseline. `negative_baseline` = the 90th percentile of those scores, recomputed as the chain grows
+3. **Forward re-entry**: when the current subject track ends, the candidates are tracks that *start* within `reid.reentry_window_secs` (default: 10 s) of its last `Tracked` frame and never overlap a known subject track. A candidate's score is the mean, over its signature samples, of the best similarity to any gallery entry. The best candidate is accepted only if:
+   - its score ≥ `reid.reentry_threshold` (default: 0.55, an absolute floor that rules out a clearly different person)
+   - its score ≥ `negative_baseline` + `reid.reentry_margin` (default: 0.05): it must look more like the subject than teammates do in this video
+   - its score is at least `reid.reentry_margin` above the runner-up candidate's, if there is one
+   - it has at least `reid.reentry_min_samples` (default: 2) signature samples (one glimpse isn't enough)
+   If no candidate qualifies, the subject is **absent** and the search window slides forward, anchored at the next window, until a qualifying track is found or the video ends. There is no upper bound on gap length: substitutions and on/off rotations in 7s/touch are long absences
+4. **Backward**: the same rules, run in reverse from the seed (tracks that *end* within the window before the current subject track starts)
+5. The result is the **subject timeline**: an ordered list of `(track_id, first_frame, last_frame)` spans, plus per-sampled-frame subject presence (box or absent). Re-entry never prompts the user
 
 #### Cross-Segment Behaviour (multi-match inputs only)
 
@@ -200,8 +205,10 @@ Once the `reference_embedding` is established:
 
 #### Failure Mode
 
-- If no track achieves lock during the confirmation pre-scan, the confirmation step is skipped and the user is asked to re-identify
-- If no track achieves lock during full-video processing by frame `reid.max_identification_frame` (default: frame 600, ~75 seconds at 8fps), emit a warning — the classifier stage will have no subject frames and the output will be empty
+- **Known limitation:** a tracker ID switch *within* a subject track's life (two neighbouring players' IDs swapping, seen during a fast camera pan on low-quality footage) hands the identity to the other player without any appearance check, because there's no gap to trigger one. To be revisited with real footage; see ARCHITECTURE §9
+
+- The seed can't fail (the pick itself seeds a track), but the user can reject the confirmation frame; see 4B step 5
+- After the full-video pass, print the subject's coverage (share of sampled frames where the subject is present, and the number of re-entries accepted). If coverage is below 10%, warn: the classifier stage will have little to work with
 
 ### Stage 5 — Moment Classification
 
@@ -418,7 +425,7 @@ When `--debug` is passed, writes annotated JPEG frames to `./debug/<stage>/`:
 
 - `debug/detection/` — bounding boxes on raw detections
 - `debug/tracking/` — track IDs per bounding box, each track drawn in its own stable colour (so an ID switch shows as a colour change); `Lost` tracks as a thin box at their predicted position
-- `debug/reid/` — cosine similarity score per track overlaid, subject highlighted in green
+- `debug/reid/` — every sampled frame of the full-video pass: the subject in a green box, other tracked players in grey, each labelled with its track ID (so re-entry decisions logged at `RUST_LOG=reid=debug` can be matched to people on screen)
 - `debug/classification/` — sampled frames with score and event label overlaid
 
 ---
@@ -501,11 +508,16 @@ candidate_window_secs    = 300
 confirmation_scan_secs   = 60
 # Max re-identification attempts before exiting with error
 max_identification_attempts = 5
-lock_threshold           = 0.72   # cosine similarity to lock subject identity
-vote_window              = 10     # frames over which to average similarity votes
-reentry_threshold        = 0.68
-reentry_vote_window      = 5
-max_identification_frame = 600    # warn if subject not re-locked by this frame
+# Track appearance signatures (Stage 4)
+signature_interval_ms    = 1000   # embed each tracked player at most this often
+signature_max_samples    = 8      # per track
+min_crop_height_px       = 40     # smaller crops carry too little appearance info
+# Identity chaining across gaps: relative, not absolute (see SPEC Stage 4)
+reentry_threshold        = 0.55   # absolute floor; rules out clearly different people
+reentry_margin           = 0.05   # must beat teammates' baseline and the runner-up by this
+reentry_window_secs      = 10     # candidates must start within this of the subject's loss
+reentry_min_samples      = 2      # signature samples a candidate needs
+gallery_max_size         = 64     # subject appearance gallery cap (oldest dropped)
 
 [classifier]
 sample_interval_ms       = 2000   # how often to query Ollama per subject presence
@@ -558,7 +570,8 @@ All errors are reported via `tracing` at the appropriate level. The CLI exits wi
 | System image viewer unavailable | Print path to terminal; user opens manually; pipeline waits |
 | Ollama not reachable at startup | Warning; classification falls back to neutral scores if `ollama.required = false` (default) |
 | Ollama returns malformed JSON | Sample assigned `score: 5.0, kind: "neutral", event: "unknown"`; logged at WARN |
-| Subject not re-locked by `max_identification_frame` | Warning emitted; pipeline continues; output will likely be empty |
+| Subject coverage below 10% after the full-video pass | Warning with coverage and re-entry counts; pipeline continues; output will likely be thin |
+| No re-entry candidate qualifies after the subject's track ends | Not an error: the subject is absent until a qualifying track appears (missing beats wrong) |
 | Zero moments found after classification | Warning; no output video written; suggests adjusting thresholds |
 | FFmpeg encoding error | Fatal error with ffmpeg stderr captured in log |
 | Cache write failure | Non-fatal warning; run continues without caching |
@@ -583,8 +596,8 @@ The following phases define the implementation roadmap. Each phase is designed t
 | 3b | Tracking: ByteTrack | End-to-end: track IDs stable across 100-frame sample |
 | 4a | ReID: Embedding | Single crop produces 512-dim embedding via ONNX |
 | 4b | ReID: Interactive Selection | Annotated frame saves, system viewer opens, user picks player, embedding generated |
-| 4c | ReID: Confirmation & Matching | Confirmation prompt works; per-frame cosine similarity correct |
-| 4d | ReID: Temporal Smoothing | Identity lock/re-entry logic verified on test sequence |
+| 4c | ReID: Seeding & Confirmation | Pick seeds the subject track directly; confirmation frame and `[y/N]` work, with retry on rejection |
+| 4d | ReID: Identity Chaining | Track appearance signatures; offline forward/backward re-entry with relative acceptance (floor, teammate baseline, runner-up margin) verified on synthetic sequences and real footage |
 | 4e | Match Segmentation | Manual `segmentation.segments` respected; heuristic gap-detection proposes boundaries from detection counts; confirm/edit prompt works; Stage 4A identification windowing targets the correct segment |
 | 5a | Classification: Ollama Client | Single frame scored successfully via Ollama with new 3-field response |
 | 5b | Classification: Moment Grouping | Highlights and lowlights correctly grouped as discrete events; merge never bridges a segment boundary |

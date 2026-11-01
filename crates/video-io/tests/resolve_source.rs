@@ -11,6 +11,7 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::Once;
 
 use video_io::source::{resolve_source, SourceConfig, SourceOrigin, SourceSidecar};
 use video_io::{remove_cached_source, VideoIoError};
@@ -26,32 +27,30 @@ struct FakeYtDlp {
     script: PathBuf,
 }
 
-impl FakeYtDlp {
-    /// `probe` is either `Ok(json)` printed for `--dump-single-json`, or
-    /// `Err(stderr)` printed to stderr with exit 1.
-    fn new(name: &str, probe: Result<&str, &str>) -> Self {
-        let dir =
-            std::env::temp_dir().join(format!("offload_resolve_{name}_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-
-        let (probe_body, probe_exit) = match probe {
-            Ok(json) => {
-                fs::write(dir.join("probe.json"), json).unwrap();
-                (format!("cat '{}'", dir.join("probe.json").display()), 0)
-            }
-            Err(stderr) => {
-                fs::write(dir.join("probe.err"), stderr).unwrap();
-                (format!("cat '{}' >&2", dir.join("probe.err").display()), 1)
-            }
-        };
-        let script = dir.join("yt-dlp");
+/// The one shared fake `yt-dlp` script, written exactly once per test
+/// binary. Each test gets a *symlink* to it in its own directory, and the
+/// script finds that test's canned responses relative to `$0`.
+///
+/// Writing a separate script per test and exec'ing it raced: tests run
+/// in parallel threads, and if one thread forks while another still has
+/// its new script open for writing, the child inherits that write fd and
+/// exec'ing the script fails with ETXTBSY ("text file busy") until the
+/// child execs. Seen as ~15% intermittent failures. With a single script
+/// written under `Once` (every test waits on it before spawning anything),
+/// no executable is ever open for writing while a test can fork.
+fn shared_script() -> PathBuf {
+    static ONCE: Once = Once::new();
+    let path = std::env::temp_dir().join(format!("offload_fake_ytdlp_{}.sh", std::process::id()));
+    ONCE.call_once(|| {
         let body = format!(
             r#"#!/bin/sh
-echo "$@" >> '{log}'
+d=$(dirname "$0")
+echo "$@" >> "$d/calls.log"
 case " $* " in
   *" --version "*) echo 2099.01.01; exit 0 ;;
-  *" --dump-single-json "*) {probe_body}; exit {probe_exit} ;;
+  *" --dump-single-json "*)
+    if [ -f "$d/probe.json" ]; then cat "$d/probe.json"; exit 0; fi
+    cat "$d/probe.err" >&2; exit 1 ;;
 esac
 out=""
 while [ $# -gt 0 ]; do
@@ -63,11 +62,29 @@ echo "[download]  50.0% of 1.00MiB"
 echo "[download] 100.0% of 1.00MiB"
 cp '{fixture}' "$dest"
 "#,
-            log = dir.join("calls.log").display(),
             fixture = fixture().display(),
         );
-        fs::write(&script, body).unwrap();
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(&path, body).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    });
+    path
+}
+
+impl FakeYtDlp {
+    /// `probe` is either `Ok(json)` printed for `--dump-single-json`, or
+    /// `Err(stderr)` printed to stderr with exit 1.
+    fn new(name: &str, probe: Result<&str, &str>) -> Self {
+        let shared = shared_script();
+        let dir =
+            std::env::temp_dir().join(format!("offload_resolve_{name}_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        match probe {
+            Ok(json) => fs::write(dir.join("probe.json"), json).unwrap(),
+            Err(stderr) => fs::write(dir.join("probe.err"), stderr).unwrap(),
+        }
+        let script = dir.join("yt-dlp");
+        std::os::unix::fs::symlink(&shared, &script).unwrap();
         Self { dir, script }
     }
 

@@ -67,11 +67,16 @@ candidate_window_secs    = 300
 confirmation_scan_secs   = 60
 # Max re-identification attempts before exiting with error
 max_identification_attempts = 5
-lock_threshold           = 0.72   # cosine similarity to lock subject identity
-vote_window              = 10     # frames over which to average similarity votes
-reentry_threshold        = 0.68
-reentry_vote_window      = 5
-max_identification_frame = 600    # warn if subject not re-locked by this frame
+# Track appearance signatures (Stage 4)
+signature_interval_ms    = 1000   # embed each tracked player at most this often
+signature_max_samples    = 8      # per track
+min_crop_height_px       = 40     # smaller crops carry too little appearance info
+# Identity chaining across gaps: relative, not absolute (see SPEC Stage 4)
+reentry_threshold        = 0.55   # absolute floor; rules out clearly different people
+reentry_margin           = 0.05   # must beat teammates' baseline and the runner-up by this
+reentry_window_secs      = 10     # candidates must start within this of the subject's loss
+reentry_min_samples      = 2      # signature samples a candidate needs
+gallery_max_size         = 64     # subject appearance gallery cap (oldest dropped)
 
 [classifier]
 sample_interval_ms       = 2000   # how often to query Ollama per subject presence

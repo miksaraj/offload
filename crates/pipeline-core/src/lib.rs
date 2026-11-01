@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use thiserror::Error;
+pub mod subject;
+
 use video_io::{ResolvedSource, SourceConfig, VideoIoError};
 
 pub use video_io::is_url;
@@ -153,40 +155,6 @@ impl From<&TrackerSection> for tracker::TrackerConfig {
     }
 }
 
-/// `[reid]` section (SPEC.md Stage 4).
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
-pub struct ReIdSection {
-    pub candidate_frame_count: u32,
-    pub candidate_window_secs: u32,
-    pub candidate_window_start_secs: Option<u32>,
-    pub confirmation_scan_secs: u32,
-    pub max_identification_attempts: u32,
-    pub lock_threshold: f32,
-    pub vote_window: u32,
-    pub reentry_threshold: f32,
-    pub reentry_vote_window: u32,
-    pub max_identification_frame: u64,
-}
-
-impl Default for ReIdSection {
-    fn default() -> Self {
-        let d = reid::ReIdConfig::default();
-        Self {
-            candidate_frame_count: d.candidate_frame_count,
-            candidate_window_secs: d.candidate_window_secs,
-            candidate_window_start_secs: d.candidate_window_start_secs,
-            confirmation_scan_secs: d.confirmation_scan_secs,
-            max_identification_attempts: d.max_identification_attempts,
-            lock_threshold: d.lock_threshold,
-            vote_window: d.vote_window,
-            reentry_threshold: d.reentry_threshold,
-            reentry_vote_window: d.reentry_vote_window,
-            max_identification_frame: d.max_identification_frame,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct CacheConfig {
@@ -213,7 +181,7 @@ pub struct Config {
     pub video: VideoConfig,
     pub detector: DetectorSection,
     pub tracker: TrackerSection,
-    pub reid: ReIdSection,
+    pub reid: reid::ReIdConfig,
     pub cache: CacheConfig,
 }
 
@@ -269,49 +237,50 @@ impl Pipeline {
     }
 
     /// `input` is a local path or an http(s) URL (SPEC.md Stage 0).
-    pub fn run(&self, input: &str, _output: &Path) -> Result<()> {
+    pub fn run(&self, input: &str, _output: &Path, debug: bool) -> Result<()> {
         let source = self.resolve_source(input)?;
         tracing::info!(path = %source.path.display(), origin = ?source.origin, "source resolved");
 
         let stdin = std::io::stdin();
         let mut stdout = std::io::stdout();
-        let selection = self.identify(
+        let result = self.follow_subject(
             &source.path,
             &reid::InteractionOptions::default(),
             &mut stdin.lock(),
             &mut stdout,
         )?;
+        let coverage = result.timeline.coverage(&result.log);
         println!(
-            "\nSelected the player at {:?} in the frame at {}{}.",
-            selection.bbox,
-            reid::identify::format_ms(selection.frame.timestamp_ms),
-            selection
-                .descriptor
-                .as_deref()
-                .map(|d| format!(" (\"{d}\")"))
-                .unwrap_or_default()
+            "Subject present in {:.0}% of {} sampled frames ({} re-entries accepted, {} \
+             ambiguous gaps left absent).",
+            coverage * 100.0,
+            result.log.frames.len(),
+            result.timeline.reentries,
+            result.timeline.rejected_windows,
         );
+        if coverage < 0.10 {
+            tracing::warn!(
+                coverage,
+                "subject coverage is below 10%; highlight classification will have little to work with"
+            );
+        }
+        if debug {
+            let dir = Path::new("debug").join("reid");
+            let n = self.write_subject_debug_frames(&source.path, &result, &dir)?;
+            println!("Wrote {n} debug frames to {}", dir.display());
+        }
         Err(PipelineError::Stage(
-            "subject identified; confirmation and tracking (Phase 4c) not yet implemented".into(),
+            "subject followed; highlight classification (Phase 5) not yet implemented".into(),
         ))
     }
 
-    /// Stage 4A: pull `reid.candidate_frame_count` frames spread across the
-    /// identification window, detect players in each, and let the user
-    /// pick themselves (see [`reid::identify`]). `input`/`out` are the
-    /// terminal (stdin/stdout from `run`; scripted in tests).
-    pub fn identify(
-        &self,
-        source_path: &Path,
-        options: &reid::InteractionOptions,
-        input: &mut impl std::io::BufRead,
-        out: &mut impl std::io::Write,
-    ) -> Result<reid::Selection> {
+    /// Stage 4A candidates: `reid.candidate_frame_count` frames spread
+    /// across the identification window, with players detected at
+    /// `detector.confidence_threshold` (only "sure" boxes are offered).
+    pub fn candidates(&self, source_path: &Path) -> Result<Vec<reid::Candidate>> {
         let cfg = &self.config.reid;
         let mut detector =
             detector::Detector::new(&self.config.models.detector, (&self.config.detector).into())?;
-        let mut model = reid::ReIdModel::new(&self.config.models.reid)?;
-
         let frames = video_io::FrameExtractor::new(source_path)?;
         let start_ms = u64::from(cfg.candidate_window_start_secs.unwrap_or(0)) * 1000;
         let targets = reid::identify::candidate_timestamps(
@@ -340,6 +309,21 @@ impl Pipeline {
             );
             candidates.push(reid::Candidate { frame, detections });
         }
+        Ok(candidates)
+    }
+
+    /// Stage 4A on its own: candidates, then the interactive pick (see
+    /// [`reid::identify`]). `input`/`out` are the terminal (stdin/stdout
+    /// from `run`; scripted in tests).
+    pub fn identify(
+        &self,
+        source_path: &Path,
+        options: &reid::InteractionOptions,
+        input: &mut impl std::io::BufRead,
+        out: &mut impl std::io::Write,
+    ) -> Result<reid::Selection> {
+        let candidates = self.candidates(source_path)?;
+        let mut model = reid::ReIdModel::new(&self.config.models.reid)?;
         Ok(reid::identify::identify_interactively(
             &candidates,
             &mut model,
