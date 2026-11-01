@@ -40,6 +40,11 @@ pub enum Command {
         /// Ignore and overwrite any existing cache.
         #[arg(long)]
         no_cache: bool,
+
+        /// Detect breaks between matches in the footage (overrides
+        /// segmentation.enabled for this run).
+        #[arg(long)]
+        auto_segment: bool,
     },
 
     /// Run detection and tracking on the first N seconds of a video, without ReID or classification.
@@ -59,6 +64,11 @@ pub enum Command {
         /// Config file path.
         #[arg(short, long, default_value = "offload.toml")]
         config: PathBuf,
+
+        /// Run heuristic match segmentation over the whole video and print
+        /// the proposed boundaries, without processing further.
+        #[arg(long)]
+        show_segments: bool,
     },
 
     /// Cache management.

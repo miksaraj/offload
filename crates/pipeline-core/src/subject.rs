@@ -14,6 +14,7 @@ use reid::{ReIdModel, Selection, SubjectTimeline};
 use tracker::{TrackState, Tracker};
 use video_io::{Frame, FrameExtractor};
 
+use crate::segmentation::{self, MatchSegment};
 use crate::{Pipeline, PipelineError, Result};
 
 /// Where to seed the subject during a scan: the picked box, on the first
@@ -46,6 +47,8 @@ pub struct Scan {
 #[derive(Debug, Clone)]
 pub struct SubjectResult {
     pub selection: Selection,
+    /// The match segments in force (one implicit segment by default).
+    pub segments: Vec<MatchSegment>,
     pub log: TrackLog,
     pub timeline: SubjectTimeline,
 }
@@ -58,15 +61,18 @@ impl Pipeline {
     /// Runs detection + tracking + signature sampling over
     /// `[start_ms, end_ms)` (to the end if `None`), sampled at
     /// `video.detection_fps`. If `seed` is given, the frame at the seed's
-    /// timestamp is always sampled and the subject seeded there.
+    /// timestamp is always sampled and the subject seeded there. Without
+    /// a `model`, no appearance signatures are collected (detection counts
+    /// for segmentation only).
     pub fn scan(
         &self,
         source_path: &Path,
         start_ms: u64,
         end_ms: Option<u64>,
         seed: Option<Seed>,
-        model: &mut ReIdModel,
+        mut model: Option<&mut ReIdModel>,
     ) -> Result<Scan> {
+        let sure = self.config.detector.confidence_threshold;
         let mut detector = detector::Detector::new(
             &self.config.models.detector,
             self.config.detector_config_for_tracking(),
@@ -91,8 +97,10 @@ impl Pipeline {
                 next_sample_ms += interval_ms;
             }
 
+            let detections = detector.detect(&frame)?;
+            let sure_count = detections.iter().filter(|d| d.confidence >= sure).count();
             let tracks = tracker
-                .update(detector.detect(&frame)?)
+                .update(detections)
                 .map_err(|e| PipelineError::Stage(e.to_string()))?;
             let mut tracked: Vec<(u64, Rect)> = tracks
                 .iter()
@@ -119,17 +127,20 @@ impl Pipeline {
                 scan.seed_track = Some(id);
             }
 
-            let due = sampler.due(ts, &tracked);
-            if !due.is_empty() {
-                let boxes: Vec<Rect> = due.iter().map(|(_, r)| *r).collect();
-                for ((id, _), e) in due.iter().zip(model.embed_boxes(&frame, &boxes)?) {
-                    scan.log.signatures.entry(*id).or_default().push(e);
+            if let Some(model) = model.as_deref_mut() {
+                let due = sampler.due(ts, &tracked);
+                if !due.is_empty() {
+                    let boxes: Vec<Rect> = due.iter().map(|(_, r)| *r).collect();
+                    for ((id, _), e) in due.iter().zip(model.embed_boxes(&frame, &boxes)?) {
+                        scan.log.signatures.entry(*id).or_default().push(e);
+                    }
                 }
             }
             scan.log.frames.push(FrameRecord {
                 timestamp_ms: ts,
                 frame_number: frame.frame_number,
                 tracks: tracked,
+                detections: sure_count,
             });
         }
         Ok(scan)
@@ -142,17 +153,42 @@ impl Pipeline {
             .ok_or_else(|| PipelineError::Stage(format!("frame {frame_number} not found")))
     }
 
-    fn resolve_timeline(&self, scan: &Scan, selection: &Selection) -> SubjectTimeline {
-        scan.seed_track
+    fn resolve_timeline(
+        &self,
+        log: &TrackLog,
+        seed_track: Option<u64>,
+        selection: &Selection,
+        segments: &[MatchSegment],
+    ) -> SubjectTimeline {
+        seed_track
             .map(|seed| {
-                reid::chain::resolve(
-                    &scan.log,
+                reid::chain::resolve_segmented(
+                    log,
+                    &segment_ranges(log, segments),
                     seed,
                     &selection.embedding,
                     &self.config.reid.chain(),
                 )
             })
             .unwrap_or_default()
+    }
+
+    /// The identification window `[start, end)`: inside the target
+    /// segment (the one containing `reid.candidate_window_start_secs`, or
+    /// the first), starting there or at that start time, lasting
+    /// `reid.candidate_window_secs`, clipped to the segment.
+    fn identification_window(&self, segments: &[MatchSegment]) -> Result<(u64, u64)> {
+        let cfg = &self.config.reid;
+        let start_at = cfg.candidate_window_start_secs.map(|s| u64::from(s) * 1000);
+        let target = segmentation::target_segment(segments, start_at).ok_or_else(|| {
+            PipelineError::Config(
+                "reid.candidate_window_start_secs falls outside every match segment".into(),
+            )
+        })?;
+        let seg = &segments[target];
+        let start = start_at.unwrap_or(seg.start_ms).max(seg.start_ms);
+        let end = (start + u64::from(cfg.candidate_window_secs) * 1000).min(seg.end_ms);
+        Ok((start, end))
     }
 
     /// Stage 4 end to end: identification (4b) → confirmation scan and
@@ -167,8 +203,14 @@ impl Pipeline {
         out: &mut impl Write,
     ) -> Result<SubjectResult> {
         let cfg = &self.config.reid;
+        let video_ms = FrameExtractor::new(source_path)?.duration_ms();
+        if self.config.segmentation.auto() {
+            return self.follow_subject_auto_segmented(source_path, video_ms, options, input, out);
+        }
+        let segments = self.config.segmentation.manual_or_implicit(video_ms)?;
+        let (win_start, win_end) = self.identification_window(&segments)?;
         let mut model = ReIdModel::new(&self.config.models.reid)?;
-        let candidates = self.candidates(source_path)?;
+        let candidates = self.candidates_in(source_path, win_start, win_end)?;
         let attempts = cfg.max_identification_attempts.max(1) as usize;
 
         let mut confirmed = None;
@@ -182,38 +224,35 @@ impl Pipeline {
                 out,
             )?;
             let seed = Seed::from(&selection);
-            let end = seed.timestamp_ms + u64::from(cfg.confirmation_scan_secs) * 1000;
+            // The confirmation scan stays inside the pick's own match.
+            let seg_end = segments
+                .iter()
+                .find(|s| s.contains(seed.timestamp_ms))
+                .map_or(u64::MAX, |s| s.end_ms);
+            let end =
+                (seed.timestamp_ms + u64::from(cfg.confirmation_scan_secs) * 1000).min(seg_end);
             let scan = self.scan(
                 source_path,
                 seed.timestamp_ms,
                 Some(end),
                 Some(seed),
-                &mut model,
+                Some(&mut model),
             )?;
-            let timeline = self.resolve_timeline(&scan, &selection);
+            let timeline = self.resolve_timeline(
+                &scan.log,
+                scan.seed_track,
+                &selection,
+                &[segmentation::whole(0)],
+            );
 
             // Latest frame of the scan with the subject on screen: shows
             // tracking held, not just the pick again.
-            let shown = (0..scan.log.frames.len())
-                .rev()
-                .find_map(|i| timeline.subject_at(&scan.log, i).map(|(_, r)| (i, *r)));
-            let Some((idx, subject_box)) = shown else {
-                continue;
-            };
-            let record = &scan.log.frames[idx];
-            let frame = self.frame_at(source_path, record.frame_number)?;
-            let others: Vec<Rect> = record
-                .tracks
-                .iter()
-                .filter(|(_, r)| *r != subject_box)
-                .map(|(_, r)| *r)
-                .collect();
-            if reid::identify::confirm_interactively(
-                &frame,
-                &subject_box,
-                &others,
-                &options.confirm_path,
-                options.open_viewer,
+            if self.confirm_preview(
+                source_path,
+                &scan.log,
+                &timeline,
+                0..scan.log.frames.len(),
+                options,
                 input,
                 out,
             )? {
@@ -235,14 +274,194 @@ impl Pipeline {
             0,
             None,
             Some(Seed::from(&selection)),
-            &mut model,
+            Some(&mut model),
         )?;
-        let timeline = self.resolve_timeline(&scan, &selection);
+        let timeline = self.resolve_timeline(&scan.log, scan.seed_track, &selection, &segments);
         Ok(SubjectResult {
             selection,
+            segments,
             log: scan.log,
             timeline,
         })
+    }
+
+    /// Shows the latest frame in `range` where the subject is present
+    /// (green) and asks `[y/N]`. `Ok(false)` also when the subject never
+    /// appears in `range`.
+    #[allow(clippy::too_many_arguments)]
+    fn confirm_preview(
+        &self,
+        source_path: &Path,
+        log: &TrackLog,
+        timeline: &SubjectTimeline,
+        range: std::ops::Range<usize>,
+        options: &reid::InteractionOptions,
+        input: &mut impl BufRead,
+        out: &mut impl Write,
+    ) -> Result<bool> {
+        // Latest frame with the subject on screen: shows tracking held,
+        // not just the pick again.
+        let Some((idx, subject_box)) = range
+            .rev()
+            .find_map(|i| timeline.subject_at(log, i).map(|(_, r)| (i, *r)))
+        else {
+            return Ok(false);
+        };
+        let record = &log.frames[idx];
+        let frame = self.frame_at(source_path, record.frame_number)?;
+        let others: Vec<Rect> = record
+            .tracks
+            .iter()
+            .filter(|(_, r)| *r != subject_box)
+            .map(|(_, r)| *r)
+            .collect();
+        Ok(reid::identify::confirm_interactively(
+            &frame,
+            &subject_box,
+            &others,
+            &options.confirm_path,
+            options.open_viewer,
+            input,
+            out,
+        )?)
+    }
+
+    /// The auto-segmentation flow (`segmentation.enabled`, no manual
+    /// list): segments come from the footage, so the full-video scan runs
+    /// *first*. Then the proposed segments are confirmed or edited, the
+    /// user picks themselves inside the target segment from tracked boxes
+    /// in that scan (so the pick is exactly a track: no rescan, no
+    /// seeding guesswork), and the confirmation preview and final chaining
+    /// both come from the same log.
+    fn follow_subject_auto_segmented(
+        &self,
+        source_path: &Path,
+        video_ms: u64,
+        options: &reid::InteractionOptions,
+        input: &mut impl BufRead,
+        out: &mut impl Write,
+    ) -> Result<SubjectResult> {
+        let cfg = &self.config.reid;
+        let mut model = ReIdModel::new(&self.config.models.reid)?;
+        writeln!(
+            out,
+            "Scanning the whole video for players and breaks between matches…"
+        )
+        .and_then(|_| out.flush())
+        .map_err(|e| PipelineError::Stage(e.to_string()))?;
+        let scan = self.scan(source_path, 0, None, None, Some(&mut model))?;
+        let samples: Vec<(u64, usize)> = scan
+            .log
+            .frames
+            .iter()
+            .map(|f| (f.timestamp_ms, f.detections))
+            .collect();
+        let proposed = segmentation::detect_segments(&samples, video_ms, &self.config.segmentation);
+        let segments = segmentation::confirm_segments(proposed, video_ms, input, out)?;
+
+        let (win_start, win_end) = self.identification_window(&segments)?;
+        let candidates = self.candidates_from_log(source_path, &scan.log, win_start, win_end)?;
+        let attempts = cfg.max_identification_attempts.max(1) as usize;
+        for attempt in 0..attempts {
+            let selection = reid::identify::identify_from(
+                &candidates,
+                attempt,
+                &mut model,
+                options,
+                input,
+                out,
+            )?;
+            let seed_idx = scan
+                .log
+                .frames
+                .iter()
+                .position(|f| f.frame_number == selection.frame.frame_number);
+            let seed_track = seed_idx.and_then(|i| {
+                scan.log.frames[i]
+                    .tracks
+                    .iter()
+                    .find(|(_, r)| *r == selection.bbox)
+                    .map(|(id, _)| *id)
+            });
+            let timeline = self.resolve_timeline(&scan.log, seed_track, &selection, &segments);
+            let from = seed_idx.unwrap_or(0);
+            let until_ms =
+                selection.frame.timestamp_ms + u64::from(cfg.confirmation_scan_secs) * 1000;
+            let to = scan
+                .log
+                .frames
+                .iter()
+                .position(|f| f.timestamp_ms >= until_ms)
+                .unwrap_or(scan.log.frames.len());
+            if self.confirm_preview(
+                source_path,
+                &scan.log,
+                &timeline,
+                from..to,
+                options,
+                input,
+                out,
+            )? {
+                return Ok(SubjectResult {
+                    selection,
+                    segments,
+                    log: scan.log,
+                    timeline,
+                });
+            }
+        }
+        Err(PipelineError::ReId(reid::ReIdError::Identification(
+            format!(
+            "subject not confirmed after {attempts} attempts (reid.max_identification_attempts)"
+        ),
+        )))
+    }
+
+    /// Identification candidates taken from an existing scan's log: the
+    /// sampled frames nearest `reid.candidate_frame_count` timestamps in
+    /// `[start, end)`, offering that frame's tracked boxes.
+    fn candidates_from_log(
+        &self,
+        source_path: &Path,
+        log: &TrackLog,
+        start: u64,
+        end: u64,
+    ) -> Result<Vec<reid::Candidate>> {
+        let targets = reid::identify::candidate_timestamps(
+            start,
+            end.saturating_sub(start),
+            0,
+            self.config.reid.candidate_frame_count,
+        );
+        let mut picks: Vec<usize> = targets
+            .iter()
+            .filter_map(|&t| {
+                log.frames
+                    .iter()
+                    .position(|f| f.timestamp_ms >= t && f.timestamp_ms < end)
+            })
+            .collect();
+        picks.dedup();
+        let wanted: Vec<u64> = picks.iter().map(|&i| log.frames[i].frame_number).collect();
+        let mut candidates = Vec::new();
+        for frame in FrameExtractor::new(source_path)? {
+            if let Some(pos) = wanted.iter().position(|&n| n == frame.frame_number) {
+                let detections = log.frames[picks[pos]]
+                    .tracks
+                    .iter()
+                    .map(|(_, r)| detector::Detection {
+                        bbox: *r,
+                        confidence: 1.0,
+                        class_id: detector::PERSON_CLASS_ID,
+                    })
+                    .collect();
+                candidates.push(reid::Candidate { frame, detections });
+                if candidates.len() == wanted.len() {
+                    break;
+                }
+            }
+        }
+        Ok(candidates)
     }
 
     /// Writes one debug frame per sampled frame to `dir`: the subject in a
@@ -315,4 +534,23 @@ impl Pipeline {
         }
         Ok(written)
     }
+}
+
+/// Inclusive frame-index ranges into `log` for each segment (segments
+/// with no sampled frames are skipped).
+pub fn segment_ranges(log: &TrackLog, segments: &[MatchSegment]) -> Vec<(usize, usize)> {
+    segments
+        .iter()
+        .filter_map(|seg| {
+            let first = log
+                .frames
+                .iter()
+                .position(|f| seg.contains(f.timestamp_ms))?;
+            let last = log
+                .frames
+                .iter()
+                .rposition(|f| seg.contains(f.timestamp_ms))?;
+            Some((first, last))
+        })
+        .collect()
 }

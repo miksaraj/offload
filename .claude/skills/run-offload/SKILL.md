@@ -153,6 +153,12 @@ expected). Add `RUST_LOG=reid=debug` to log every re-entry decision
 frames. Use a release build for whole clips.
 `crates/pipeline-core/tests/follow_subject.rs` is the known-answer
 occlusion test; it takes about 80 s in debug.
+`crates/pipeline-core/tests/segmentation.rs` is the known-answer
+two-match test (a `bus.jpg` video blanked grey from 6–12 s), with auto
+and manual segments; about 75 s in debug. `offload inspect
+--show-segments -i <clip>` prints proposed match boundaries from a
+detection-only scan; `run --auto-segment` turns on the scan-first flow
+(the segments prompt comes before the pick).
 
 **Visual check on real footage:** `RUST_LOG=info ./target/debug/offload
 inspect -i <clip or URL> -d 10 -o /tmp/inspect` writes one annotated

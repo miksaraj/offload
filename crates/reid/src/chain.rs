@@ -28,6 +28,9 @@ pub struct FrameRecord {
     pub timestamp_ms: u64,
     pub frame_number: u64,
     pub tracks: Vec<(u64, Rect)>,
+    /// "Sure" detections on this frame (at `detector.confidence_threshold`),
+    /// the signal match segmentation reads.
+    pub detections: usize,
 }
 
 /// Tracking output for a span of video: per-sampled-frame tracked boxes,
@@ -41,14 +44,18 @@ pub struct TrackLog {
 impl TrackLog {
     /// `(first, last)` frame index at which each track is `Tracked`.
     pub fn spans(&self) -> HashMap<u64, (usize, usize)> {
-        let mut spans: HashMap<u64, (usize, usize)> = HashMap::new();
-        for (i, f) in self.frames.iter().enumerate() {
-            for &(id, _) in &f.tracks {
-                spans.entry(id).and_modify(|s| s.1 = i).or_insert((i, i));
-            }
-        }
-        spans
+        spans_of(&self.frames)
     }
+}
+
+fn spans_of(frames: &[FrameRecord]) -> HashMap<u64, (usize, usize)> {
+    let mut spans: HashMap<u64, (usize, usize)> = HashMap::new();
+    for (i, f) in frames.iter().enumerate() {
+        for &(id, _) in &f.tracks {
+            spans.entry(id).and_modify(|s| s.1 = i).or_insert((i, i));
+        }
+    }
+    spans
 }
 
 /// Decides which tracked boxes get a signature sample on a frame: the
@@ -190,7 +197,13 @@ fn percentile_90(mut v: Vec<f32>) -> Option<f32> {
 }
 
 struct Chainer<'a> {
-    log: &'a TrackLog,
+    /// The frames being chained over: the whole log, or one match
+    /// segment's slice of it (chaining never crosses a segment boundary).
+    frames: &'a [FrameRecord],
+    signatures: &'a HashMap<u64, Vec<Embedding>>,
+    /// Teammate baseline carried in from another segment, used until this
+    /// one has subject spans of its own to derive one from.
+    external_baseline: Option<f32>,
     cfg: &'a ChainConfig,
     spans: HashMap<u64, (usize, usize)>,
     gallery: Vec<Embedding>,
@@ -202,11 +215,11 @@ struct Chainer<'a> {
 
 impl Chainer<'_> {
     fn ts(&self, idx: usize) -> u64 {
-        self.log.frames[idx].timestamp_ms
+        self.frames[idx].timestamp_ms
     }
 
     fn samples(&self, id: u64) -> &[Embedding] {
-        self.log.signatures.get(&id).map_or(&[], Vec::as_slice)
+        self.signatures.get(&id).map_or(&[], Vec::as_slice)
     }
 
     fn overlaps_subject(&self, (first, last): (usize, usize)) -> bool {
@@ -249,8 +262,20 @@ impl Chainer<'_> {
     /// Looks for the subject's re-entry after (`forward`) or before the
     /// time `anchor_ms`, sliding the window until something qualifies or
     /// the video runs out. Returns the accepted track.
-    fn search(&mut self, mut anchor_ms: u64, forward: bool) -> Option<u64> {
-        let (video_start, video_end) = (self.ts(0), self.ts(self.log.frames.len() - 1));
+    fn search(&mut self, anchor_ms: u64, forward: bool) -> Option<u64> {
+        self.search_from(anchor_ms, forward, false)
+    }
+
+    /// [`search`](Self::search); with `inclusive`, a forward search also
+    /// considers tracks starting exactly at `anchor_ms` (a segment's
+    /// first frame, which may be timestamp 0).
+    fn search_from(
+        &mut self,
+        mut anchor_ms: u64,
+        forward: bool,
+        mut inclusive: bool,
+    ) -> Option<u64> {
+        let (video_start, video_end) = (self.ts(0), self.ts(self.frames.len() - 1));
         let w = self.cfg.reentry_window_ms.max(1);
         loop {
             if (forward && anchor_ms >= video_end) || (!forward && anchor_ms <= video_start) {
@@ -273,7 +298,7 @@ impl Chainer<'_> {
                         self.ts(last)
                     };
                     if forward {
-                        t > lo && t <= hi
+                        (t > lo || (inclusive && t == lo)) && t <= hi
                     } else {
                         t >= lo && t < hi
                     }
@@ -285,7 +310,7 @@ impl Chainer<'_> {
 
             if let Some(&(best, best_score)) = cands.first() {
                 let runner_up = cands.get(1).map(|c| c.1);
-                let baseline = self.negative_baseline();
+                let baseline = self.negative_baseline().or(self.external_baseline);
                 let m = self.cfg.reentry_margin;
                 let ok = best_score >= self.cfg.reentry_threshold
                     && baseline.is_none_or(|b| best_score >= b + m)
@@ -304,58 +329,150 @@ impl Chainer<'_> {
                 }
                 self.rejected_windows += 1;
             }
+            inclusive = false;
             anchor_ms = if forward { hi } else { lo };
         }
     }
 }
 
+impl<'a> Chainer<'a> {
+    fn new(
+        frames: &'a [FrameRecord],
+        signatures: &'a HashMap<u64, Vec<Embedding>>,
+        cfg: &'a ChainConfig,
+        gallery: Vec<Embedding>,
+        external_baseline: Option<f32>,
+    ) -> Self {
+        Self {
+            frames,
+            signatures,
+            external_baseline,
+            cfg,
+            spans: spans_of(frames),
+            gallery,
+            subject: Vec::new(),
+            used: HashSet::new(),
+            reentries: 0,
+            rejected_windows: 0,
+        }
+    }
+
+    /// Accepts `seed` and chains forward and backward from it.
+    fn chain_from(&mut self, seed: u64) {
+        let seed_span = self.spans[&seed];
+        self.accept(seed);
+        let mut cur = seed_span;
+        while let Some(next) = self.search(self.ts(cur.1), true) {
+            self.accept(next);
+            self.reentries += 1;
+            cur = self.spans[&next];
+        }
+        let mut cur = seed_span;
+        while let Some(prev) = self.search(self.ts(cur.0), false) {
+            self.accept(prev);
+            self.reentries += 1;
+            cur = self.spans[&prev];
+        }
+    }
+
+    /// For a segment with no seed: the first track, searching forward from
+    /// the segment's start, that qualifies as the subject by appearance.
+    fn find_first(&mut self) -> Option<u64> {
+        if self.frames.is_empty() {
+            return None;
+        }
+        self.search_from(self.ts(0), true, true)
+    }
+}
+
 /// Resolves the subject over `log`, starting from `seed_track` (the
 /// track the user's pick seeded) and the pick's embedding, chaining
-/// forward and backward through re-entries.
+/// forward and backward through re-entries. The whole log is one match.
 pub fn resolve(
     log: &TrackLog,
     seed_track: u64,
     pick_embedding: &Embedding,
     cfg: &ChainConfig,
 ) -> SubjectTimeline {
-    let spans = log.spans();
-    let Some(&seed_span) = spans.get(&seed_track) else {
+    let all = [(0, log.frames.len().saturating_sub(1))];
+    if log.frames.is_empty() {
+        return SubjectTimeline::default();
+    }
+    resolve_segmented(log, &all, seed_track, pick_embedding, cfg)
+}
+
+/// [`resolve`] over match segments, given as inclusive frame-index ranges
+/// into `log` (sorted, non-overlapping; frames outside every range are
+/// never the subject). Chaining never crosses a segment boundary. The
+/// seed's segment chains from the seed. Every other segment has no seed,
+/// so the subject is found there by appearance alone: the first track
+/// that qualifies under the same relative rule, judged against the
+/// gallery and teammate baseline built so far (the seed segment's
+/// baseline until the new segment has its own). If none qualifies, the
+/// subject is absent for that match (a bye, or not selected).
+pub fn resolve_segmented(
+    log: &TrackLog,
+    segments: &[(usize, usize)],
+    seed_track: u64,
+    pick_embedding: &Embedding,
+    cfg: &ChainConfig,
+) -> SubjectTimeline {
+    let all_spans = log.spans();
+    let Some(&(seed_first, _)) = all_spans.get(&seed_track) else {
         return SubjectTimeline::default();
     };
-    let mut c = Chainer {
-        log,
-        cfg,
-        spans,
-        gallery: vec![pick_embedding.clone()],
-        subject: Vec::new(),
-        used: HashSet::new(),
-        reentries: 0,
-        rejected_windows: 0,
+    let Some(seed_seg) = segments
+        .iter()
+        .position(|&(a, b)| (a..=b).contains(&seed_first))
+    else {
+        return SubjectTimeline::default();
     };
-    c.accept(seed_track);
 
-    // Forward from the seed.
-    let mut cur = seed_span;
-    while let Some(next) = c.search(c.ts(cur.1), true) {
-        c.accept(next);
-        c.reentries += 1;
-        cur = c.spans[&next];
-    }
-    // Backward from the seed.
-    let mut cur = seed_span;
-    while let Some(prev) = c.search(c.ts(cur.0), false) {
-        c.accept(prev);
-        c.reentries += 1;
-        cur = c.spans[&prev];
+    let mut timeline = SubjectTimeline::default();
+    let absorb = |c: Chainer<'_>, offset: usize, timeline: &mut SubjectTimeline| {
+        timeline.spans.extend(c.subject.iter().map(|s| SubjectSpan {
+            track_id: s.track_id,
+            first: s.first + offset,
+            last: s.last + offset,
+        }));
+        timeline.reentries += c.reentries;
+        timeline.rejected_windows += c.rejected_windows;
+        let baseline = c.negative_baseline().or(c.external_baseline);
+        (c.gallery, baseline)
+    };
+
+    // The seed's own segment first: it defines the gallery and baseline.
+    let (a, b) = segments[seed_seg];
+    let mut c = Chainer::new(
+        &log.frames[a..=b],
+        &log.signatures,
+        cfg,
+        vec![pick_embedding.clone()],
+        None,
+    );
+    c.chain_from(seed_track);
+    let (mut gallery, mut baseline) = absorb(c, a, &mut timeline);
+
+    for (i, &(a, b)) in segments.iter().enumerate() {
+        if i == seed_seg || b < a || b >= log.frames.len() {
+            continue;
+        }
+        let mut c = Chainer::new(
+            &log.frames[a..=b],
+            &log.signatures,
+            cfg,
+            gallery.clone(),
+            baseline,
+        );
+        if let Some(first) = c.find_first() {
+            c.chain_from(first);
+            c.reentries += 1;
+        }
+        (gallery, baseline) = absorb(c, a, &mut timeline);
     }
 
-    let mut spans = c.subject;
-    spans.sort_by_key(|s| s.first);
-    SubjectTimeline {
-        spans,
-        reentries: c.reentries,
-        rejected_windows: c.rejected_windows,
-    }
+    timeline.spans.sort_by_key(|s| s.first);
+    timeline
 }
 
 #[cfg(test)]
@@ -390,6 +507,7 @@ mod tests {
                 timestamp_ms: s as u64 * 1000,
                 frame_number: s as u64,
                 tracks: Vec::new(),
+                detections: 0,
             };
             for (id, first, last, _) in tracks {
                 if (*first..=*last).contains(&s) {
@@ -526,6 +644,75 @@ mod tests {
     }
 
     #[test]
+    fn segments_stop_chaining_at_the_boundary() {
+        let me = emb(1, KIT);
+        // Match 1 = 0–29 s, match 2 = 30–59 s. The subject's track 1 ends
+        // at 20 s; track 5 (looks just like them) starts at 32 s, inside
+        // the re-entry window but across the boundary. Unsegmented, that's
+        // a re-entry; segmented, track 5 is only accepted as match 2's own
+        // first appearance, not by bridging.
+        let l = log(
+            &[
+                (1, 0, 20, me.clone()),
+                (3, 0, 59, emb(3, KIT)),
+                (5, 32, 59, me.clone()),
+            ],
+            60,
+        );
+        let t = resolve_segmented(&l, &[(0, 29), (30, 59)], 1, &me, &ChainConfig::default());
+        assert_eq!(ids(&t), vec![1, 5]);
+        // A track straddling the boundary is split: its match-2 part is
+        // judged separately.
+        assert!(t.subject_at(&l, 25).is_none());
+    }
+
+    #[test]
+    fn a_segment_without_the_subject_is_not_an_error() {
+        let me = emb(1, KIT);
+        // Match 2 has only teammates: nobody clears the seed match's
+        // teammate baseline, so the subject is absent there.
+        let l = log(
+            &[
+                (1, 0, 29, me.clone()),
+                (3, 0, 29, emb(3, KIT)),
+                (6, 30, 59, emb(6, KIT)),
+                (7, 30, 59, emb(7, KIT)),
+            ],
+            60,
+        );
+        let t = resolve_segmented(&l, &[(0, 29), (30, 59)], 1, &me, &ChainConfig::default());
+        assert_eq!(ids(&t), vec![1]);
+        assert!(t.subject_at(&l, 45).is_none());
+    }
+
+    #[test]
+    fn subject_is_found_in_an_earlier_segment_too() {
+        let me = emb(1, KIT);
+        // Picked in match 2 (track 8); the subject also played in match 1
+        // (track 2), alongside teammate 3.
+        let l = log(
+            &[
+                (2, 0, 29, me.clone()),
+                (3, 0, 29, emb(3, KIT)),
+                (8, 30, 59, me.clone()),
+                (9, 30, 59, emb(9, KIT)),
+            ],
+            60,
+        );
+        let t = resolve_segmented(&l, &[(0, 29), (30, 59)], 8, &me, &ChainConfig::default());
+        assert_eq!(ids(&t), vec![2, 8]);
+    }
+
+    #[test]
+    fn frames_outside_every_segment_are_never_the_subject() {
+        let me = emb(1, KIT);
+        let l = log(&[(1, 0, 59, me.clone())], 60);
+        let t = resolve_segmented(&l, &[(0, 19), (40, 59)], 1, &me, &ChainConfig::default());
+        assert!(t.subject_at(&l, 10).is_some());
+        assert!(t.subject_at(&l, 30).is_none(), "between matches");
+    }
+
+    #[test]
     fn unknown_seed_gives_an_empty_timeline() {
         let me = emb(1, KIT);
         let l = log(&[(1, 0, 9, me.clone())], 10);
@@ -557,17 +744,7 @@ mod tests {
             gallery_max_size: 4,
             ..ChainConfig::default()
         };
-        let spans = l.spans();
-        let mut c = Chainer {
-            log: &l,
-            cfg: &cfg,
-            spans,
-            gallery: vec![me.clone()],
-            subject: Vec::new(),
-            used: HashSet::new(),
-            reentries: 0,
-            rejected_windows: 0,
-        };
+        let mut c = Chainer::new(&l.frames, &l.signatures, &cfg, vec![me.clone()], None);
         c.accept(1);
         assert_eq!(c.gallery.len(), 4);
         assert_eq!(c.gallery[0], me);

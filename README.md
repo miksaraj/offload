@@ -10,7 +10,7 @@ You provide a full game video, either a file on disk or a YouTube link. Offload 
 
 ## Status
 
-🚧 **In development.** Architecture and specification are complete. Project skeleton, video I/O (frame extraction, clip assembly, and local-file or YouTube input), player detection, multi-object tracking, and finding you in the footage (pick yourself once, confirm, and Offload follows you through the video) are done. `offload run` currently stops after that step, before highlight classification, which is next. See [CLAUDE.md](./CLAUDE.md#current-state) for the current build state.
+🚧 **In development.** Architecture and specification are complete. Project skeleton, video I/O (frame extraction, clip assembly, and local-file or YouTube input), player detection, multi-object tracking, and finding you in the footage (pick yourself once, confirm, and Offload follows you through the video, including tournament streams split into separate matches) are done. `offload run` currently stops after that step, before highlight classification, which is next. See [CLAUDE.md](./CLAUDE.md#current-state) for the current build state.
 
 ---
 
@@ -68,9 +68,10 @@ ollama pull llava
 ```
 offload run     --input <video|url>  [--output <video>]
                 [--config <path>] [--debug] [--dry-run] [--no-cache]
+                [--auto-segment]                        # multi-match videos
 
 offload inspect --input <video|url>  [--duration <secs>] [--output-dir <dir>]
-                [--config <path>]                       # annotated frame dump
+                [--config <path>] [--show-segments]     # annotated frame dump
 
 offload cache   --clear  [--input <video|url>]            # wipe intermediate results
 
@@ -111,7 +112,7 @@ See [SPEC.md](./SPEC.md) for functional requirements, pipeline behaviour, input/
 | 1 | Video I/O (extraction, compilation, YouTube/URL input) | ✅ |
 | 2 | Player detection (YOLOv8 + ONNX) | ✅ |
 | 3 | Multi-object tracking (ByteTrack) | ✅ |
-| 4 | Player re-identification (OSNet) + match segmentation for multi-match/tournament inputs | 🟡 (4a–4d ✅: embeddings, selection, confirmation, identity chaining; 4e segmentation ⬜) |
+| 4 | Player re-identification (OSNet) + match segmentation for multi-match/tournament inputs | ✅ |
 | 5 | Highlight classification (Ollama) | ⬜ |
 | 6 | Pipeline integration | ⬜ |
 | 7 | Output polish & usability | ⬜ |

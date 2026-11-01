@@ -157,12 +157,20 @@ Player re-identification via OSNet ONNX model, with an interactive identificatio
 - `TrackLog { frames: Vec<FrameRecord { timestamp_ms, frame_number, tracks: Vec<(id, Rect)> }>, signatures: HashMap<id, Vec<Embedding>> }`: the tracking output of a scan, with `Tracked` boxes only
 - `SignatureSampler`: picks which tracked boxes to embed on a frame (first eligible frame of a track, then every `signature_interval_ms`, up to `signature_max_samples`, boxes ≥ `min_crop_height_px`)
 - `resolve(log, seed_track, pick_embedding, ChainConfig) -> SubjectTimeline { spans, reentries, rejected_windows }`: offline forward + backward chaining from the seed. A re-entry candidate must clear the absolute floor, beat this video's teammate baseline (the 90th-percentile gallery score of tracks seen alongside the subject) by `reentry_margin`, and beat the runner-up by the same margin. Otherwise the subject is absent and the window slides on
+- `resolve_segmented(log, segment_frame_ranges, seed_track, pick_embedding, ChainConfig)`: the same thing per match segment, never chaining across a boundary. The seed's segment chains from the seed; every other segment finds the subject by appearance alone, using the gallery and teammate baseline carried over (`Chainer::find_first`, an inclusive first-window search, so a segment starting at timestamp 0 works). `resolve` is this with a single whole-log segment
 - `SubjectTimeline::{subject_at, coverage}`
 
 **Orchestration (`pipeline_core::subject`):**
 - `Pipeline::scan(path, start, end, seed, model) -> Scan { log, seed_track }`: detector (at the tracker's low floor) → tracker → signature sampling; force-samples the seed frame and seeds the subject there (best IoU ≥ 0.3 with the pick, else `Tracker::add_track`)
 - `Pipeline::follow_subject(path, options, input, out) -> SubjectResult { selection, log, timeline }`: candidates → pick → confirmation scan (`confirmation_scan_secs`) + chaining → confirmation frame (latest frame with the subject) → `[y/N]`, retrying up to `max_identification_attempts` → full-video scan + chaining
 - `Pipeline::write_subject_debug_frames`: `debug/reid/` frames for `run --debug`
+- With auto-segmentation, `follow_subject` takes a second path: full scan first → `segmentation::detect_segments` over per-frame "sure" detection counts (`FrameRecord::detections`) → `confirm_segments` (accept / edit / none) → pick from the scan's tracked boxes in the target segment → preview and chaining from the same log
+
+**Match segmentation (`pipeline_core::segmentation`, Phase 4e):**
+- `MatchSegment { start_ms, end_ms, label }`, `SegmentationConfig` (`[segmentation]`, including the manual `segments` list with `"HH:MM:SS"` times, validated sorted and non-overlapping)
+- `detect_segments(samples, video_ms, cfg)`: ±2.5 s rolling-median smoothing → empty runs ≥ `min_gap_ms` → midpoint boundaries → drop segments whose active span < `min_segment_duration_ms`
+- `confirm_segments`, `parse_segment_list`, `target_segment` (the one containing `reid.candidate_window_start_secs`, else the first)
+- `Pipeline::show_segments` backs `inspect --show-segments` (a detection-only scan, no ReID)
 
 ### `classifier`
 
