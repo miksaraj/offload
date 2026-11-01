@@ -20,6 +20,7 @@ fn main() -> Result<()> {
             debug: debug_mode,
             dry_run,
             no_cache,
+            auto_segment,
         } => {
             tracing::info!(
                 ?input,
@@ -30,7 +31,10 @@ fn main() -> Result<()> {
                 no_cache,
                 "offload run"
             );
-            let config = Config::load(&config).unwrap_or_default();
+            let mut config = Config::load(&config).unwrap_or_default();
+            if auto_segment {
+                config.segmentation.enabled = true;
+            }
             let pipeline = Pipeline::new(config);
             pipeline.run(&input, &output, debug_mode)?;
         }
@@ -39,9 +43,18 @@ fn main() -> Result<()> {
             duration,
             output_dir,
             config,
+            show_segments,
         } => {
             tracing::info!(?input, duration, ?output_dir, ?config, "offload inspect");
             let pipeline = Pipeline::new(Config::load(&config).unwrap_or_default());
+            if show_segments {
+                let segments = pipeline.show_segments(&input)?;
+                println!("Proposed match segments ({}):", segments.len());
+                for (i, s) in segments.iter().enumerate() {
+                    println!("  {}", s.describe(i));
+                }
+                return Ok(());
+            }
             let s = pipeline.inspect(&input, duration, &output_dir)?;
             let per_frame = |n: usize| {
                 if s.frames_processed == 0 {

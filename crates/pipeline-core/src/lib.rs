@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use thiserror::Error;
+pub mod segmentation;
 pub mod subject;
 
 use video_io::{ResolvedSource, SourceConfig, VideoIoError};
@@ -181,6 +182,7 @@ pub struct Config {
     pub video: VideoConfig,
     pub detector: DetectorSection,
     pub tracker: TrackerSection,
+    pub segmentation: segmentation::SegmentationConfig,
     pub reid: reid::ReIdConfig,
     pub cache: CacheConfig,
 }
@@ -258,6 +260,21 @@ impl Pipeline {
             result.timeline.reentries,
             result.timeline.rejected_windows,
         );
+        if result.segments.len() > 1 {
+            let ranges = subject::segment_ranges(&result.log, &result.segments);
+            for (i, seg) in result.segments.iter().enumerate() {
+                let present = ranges.get(i).map_or(0, |&(a, b)| {
+                    (a..=b)
+                        .filter(|&f| result.timeline.subject_at(&result.log, f).is_some())
+                        .count()
+                });
+                let total = ranges.get(i).map_or(0, |&(a, b)| b - a + 1);
+                println!(
+                    "  {}: present in {present} of {total} sampled frames",
+                    seg.describe(i)
+                );
+            }
+        }
         if coverage < 0.10 {
             tracing::warn!(
                 coverage,
@@ -274,18 +291,55 @@ impl Pipeline {
         ))
     }
 
-    /// Stage 4A candidates: `reid.candidate_frame_count` frames spread
-    /// across the identification window, with players detected at
-    /// `detector.confidence_threshold` (only "sure" boxes are offered).
+    /// `offload inspect --show-segments`: a detection-only scan of the
+    /// whole video, then heuristic segmentation over its detection counts
+    /// (regardless of `segmentation.enabled`).
+    pub fn show_segments(&self, input: &str) -> Result<Vec<segmentation::MatchSegment>> {
+        let source = self.resolve_source(input)?;
+        let video_ms = video_io::FrameExtractor::new(&source.path)?.duration_ms();
+        let scan = self.scan(&source.path, 0, None, None, None)?;
+        let samples: Vec<(u64, usize)> = scan
+            .log
+            .frames
+            .iter()
+            .map(|f| (f.timestamp_ms, f.detections))
+            .collect();
+        Ok(segmentation::detect_segments(
+            &samples,
+            video_ms,
+            &self.config.segmentation,
+        ))
+    }
+
+    /// Stage 4A candidates over the whole video's identification window
+    /// (`reid.candidate_window_start_secs` + `candidate_window_secs`).
     pub fn candidates(&self, source_path: &Path) -> Result<Vec<reid::Candidate>> {
+        let cfg = &self.config.reid;
+        let start = u64::from(cfg.candidate_window_start_secs.unwrap_or(0)) * 1000;
+        self.candidates_in(
+            source_path,
+            start,
+            start + u64::from(cfg.candidate_window_secs) * 1000,
+        )
+    }
+
+    /// Stage 4A candidates: `reid.candidate_frame_count` frames spread
+    /// across `[start_ms, end_ms)` (clipped to the video), with players
+    /// detected at `detector.confidence_threshold` (only "sure" boxes are
+    /// offered).
+    pub fn candidates_in(
+        &self,
+        source_path: &Path,
+        start_ms: u64,
+        end_ms: u64,
+    ) -> Result<Vec<reid::Candidate>> {
         let cfg = &self.config.reid;
         let mut detector =
             detector::Detector::new(&self.config.models.detector, (&self.config.detector).into())?;
         let frames = video_io::FrameExtractor::new(source_path)?;
-        let start_ms = u64::from(cfg.candidate_window_start_secs.unwrap_or(0)) * 1000;
         let targets = reid::identify::candidate_timestamps(
             start_ms,
-            u64::from(cfg.candidate_window_secs) * 1000,
+            end_ms.saturating_sub(start_ms),
             frames.duration_ms(),
             cfg.candidate_frame_count,
         );

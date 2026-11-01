@@ -294,6 +294,39 @@ the new `[reid]` keys are in SPEC §6.
   covers the retry loop giving up after `max_identification_attempts`.
   Together they take about 80 s in a debug build.
 
+Phase 4e (match segmentation) is complete, which completes Phase 4.
+`pipeline_core::segmentation`: `MatchSegment`, `[segmentation]` config
+(manual `"HH:MM:SS"` list, validated), and `detect_segments`. The
+heuristic: ±2.5 s rolling median over "sure" detection counts → empty
+runs ≥ `min_gap_ms` → midpoint boundaries → drop segments whose
+*active* span (not counting the inherited half-gaps; the first version
+counted them and kept a 10 s warm-up as a "match") is under
+`min_segment_duration_ms`. Also `confirm_segments` (accept / edit /
+none) and `target_segment`. `reid::chain::resolve_segmented` chains per
+segment: the seed's segment from the seed, other segments by appearance
+alone (`find_first`) using the carried-over gallery and teammate
+baseline. `Chainer` now works over a frame slice plus the shared
+signatures map, with no per-segment log clone. `FrameRecord` gained
+`detections`. `scan` takes `Option<&mut ReIdModel>` (detection-only
+for `inspect --show-segments`). Identification and the confirmation
+scan are confined to the target segment. **With auto-segmentation, the
+full scan runs first** (detection counts are needed before you can
+pick), and the pick list is that scan's *tracked* boxes, so the partly
+visible `bus.jpg` edge person (0.42 < the 0.5 new-track threshold)
+isn't offered there. CLI: `run --auto-segment`, `inspect
+--show-segments`; `run` prints per-match presence.
+`crates/pipeline-core/tests/segmentation.rs` is the known-answer test:
+an 18 s `bus.jpg` video with the frame blanked grey from 6–12 s. Auto
+mode finds 2 matches with the boundary inside the break; the subject
+is the seed in match 1 and is re-found by appearance in match 2, never
+bridged across. Manual segments with `candidate_window_start_secs = 13`
+identify in match 2 and re-find the subject in match 1. On the user's
+single-match clip, `--show-segments` with aggressive 4 s/3 s settings
+correctly proposes one segment. A dependency-only `opt-level = 2` dev
+profile was measured as speeding these tests only from 74 to 66 s, so
+it wasn't adopted: the time is in our own crates' unoptimised
+preprocessing.
+
 **Real clip, picking a green-kit player (#9 at 4.1 s): the subject
 was handed to the wrong player by a tracker ID switch.** During a
 camera pan between 4.1 s and 7.8 s the tracker swapped IDs 33 and 42:
